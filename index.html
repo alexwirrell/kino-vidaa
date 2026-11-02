@@ -1,0 +1,2830 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Kino TV — VIDAA OS Edition (Tienda Completa de Plugins)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>
+  <style>
+    :root {
+      --bg: #090a0f;
+      --panel: #12151f;
+      --panel-alt: #181c29;
+      --card: #1b2030;
+      --accent: #e50914;
+      --accent-hover: #ff1e29;
+      --accent-glow: rgba(229, 9, 20, 0.45);
+      --green: #1db954;
+      --text: #f5f6fa;
+      --muted: #9aa2b8;
+      --border: rgba(255, 255, 255, 0.08);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+    }
+    /* Sidebar */
+    .sidebar {
+      width: 250px;
+      background: var(--panel);
+      display: flex;
+      flex-direction: column;
+      padding: 24px 14px;
+      gap: 8px;
+      border-right: 1px solid var(--border);
+      z-index: 20;
+      flex-shrink: 0;
+    }
+    .brand {
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      color: var(--accent);
+      padding: 0 12px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .brand span {
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 700;
+      background: #252b3d;
+      padding: 4px 8px;
+      border-radius: 6px;
+      letter-spacing: 0.4px;
+    }
+    .nav-btn {
+      background: transparent;
+      border: 2px solid transparent;
+      color: var(--muted);
+      font-size: 16px;
+      font-weight: 600;
+      text-align: left;
+      padding: 12px 14px;
+      border-radius: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      transition: all 0.14s ease;
+    }
+    .nav-btn.active {
+      color: var(--text);
+      background: rgba(229, 9, 20, 0.14);
+      border-color: rgba(229, 9, 20, 0.35);
+    }
+    .nav-badge {
+      background: #262c3f;
+      color: #dce1f0;
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 99px;
+      font-weight: 700;
+    }
+    .focusable:focus, .focusable.tv-focus {
+      outline: none;
+      border-color: var(--accent) !important;
+      box-shadow: 0 0 0 4px var(--accent-glow);
+      transform: scale(1.02);
+      color: var(--text);
+      z-index: 5;
+    }
+    /* Main area */
+    .main {
+      flex: 1;
+      height: 100vh;
+      overflow-y: auto;
+      padding: 28px 36px 90px;
+      scroll-behavior: smooth;
+    }
+    .header-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 22px;
+      flex-wrap: wrap;
+    }
+    .section-title { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; }
+    .status-pill {
+      font-size: 13px;
+      color: #d0d6e8;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      padding: 8px 14px;
+      border-radius: 99px;
+      max-width: 520px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* Tabs & Pills */
+    .tabs-bar, .cat-bar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .pill-btn {
+      background: var(--panel-alt);
+      color: var(--muted);
+      border: 2px solid transparent;
+      padding: 9px 16px;
+      border-radius: 99px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.14s ease;
+    }
+    .pill-btn.active {
+      background: var(--accent);
+      color: #fff;
+    }
+    /* Media Rows & Grids */
+    .row-section { margin-bottom: 34px; }
+    .row-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .row-title { font-size: 19px; font-weight: 700; color: #e4e8f5; display: flex; align-items: center; gap: 10px; }
+    .row-source-tag { font-size: 11px; background: #23293b; color: var(--muted); padding: 3px 8px; border-radius: 6px; font-weight: 600; }
+    .cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
+      gap: 16px;
+    }
+    .card {
+      background: var(--card);
+      border: 2px solid transparent;
+      border-radius: 12px;
+      overflow: hidden;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.14s ease;
+      position: relative;
+    }
+    .card-poster {
+      width: 100%;
+      aspect-ratio: 2/3;
+      background: #232838;
+      object-fit: cover;
+      display: block;
+    }
+    .card-body { padding: 10px 12px; }
+    .card-title { font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .card-meta { font-size: 12px; color: var(--muted); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* Plugin Store Grid */
+    .plugins-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+      gap: 16px;
+    }
+    .plugin-card {
+      background: var(--card);
+      border: 2px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      justify-content: space-between;
+    }
+    .plugin-card.installed {
+      border-color: rgba(29, 185, 84, 0.45);
+      background: linear-gradient(180deg, rgba(29, 185, 84, 0.08), var(--card));
+    }
+    .plugin-top { display: flex; gap: 12px; align-items: center; }
+    .plugin-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      background: #262c3f;
+      object-fit: cover;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 18px;
+      color: #fff;
+    }
+    .plugin-title { font-size: 16px; font-weight: 700; color: var(--text); }
+    .plugin-sub { font-size: 12px; color: var(--muted); margin-top: 2px; word-break: break-all; }
+    .plugin-desc { font-size: 13px; color: #c4cadb; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .plugin-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+    .tag-chip { font-size: 11px; background: #252b3d; color: #b8c0d8; padding: 3px 8px; border-radius: 6px; font-weight: 600; }
+    .tag-chip.official { background: rgba(229, 9, 20, 0.2); color: #ff858b; }
+    .tag-chip.stremio { background: rgba(115, 75, 255, 0.22); color: #bca6ff; }
+    .plugin-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    /* Inputs & Buttons */
+    .input-row { display: flex; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
+    .tv-input {
+      flex: 1;
+      min-width: 240px;
+      background: var(--panel-alt);
+      border: 2px solid #2d344a;
+      color: var(--text);
+      font-size: 16px;
+      padding: 11px 15px;
+      border-radius: 10px;
+    }
+    .action-btn {
+      background: var(--accent);
+      color: #fff;
+      border: 2px solid transparent;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 10px 16px;
+      border-radius: 10px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .action-btn.secondary { background: #262d42; color: #e2e6f3; }
+    .action-btn.success { background: var(--green); color: #fff; }
+    .action-btn.small { padding: 8px 13px; font-size: 13px; }
+    /* Overlays */
+    .overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(7, 8, 12, 0.96);
+      display: none;
+      flex-direction: column;
+      padding: 36px 44px;
+      z-index: 60;
+      overflow-y: auto;
+    }
+    .overlay.open { display: flex; }
+    .detail-box { display: flex; gap: 32px; max-width: 1180px; width: 100%; margin: 0 auto; align-items: flex-start; }
+    .detail-poster { width: 240px; border-radius: 14px; aspect-ratio: 2/3; object-fit: cover; background: #222; flex-shrink: 0; }
+    .detail-info { flex: 1; min-width: 0; }
+    .detail-title { font-size: 32px; font-weight: 800; margin-bottom: 8px; }
+    .detail-desc { font-size: 16px; line-height: 1.55; color: #c5cae0; margin: 14px 0 22px; }
+    .btn-group { display: flex; gap: 12px; flex-wrap: wrap; }
+    .episodes-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 10px;
+      margin-top: 16px;
+      max-height: 320px;
+      overflow-y: auto;
+      padding: 4px;
+    }
+    .ep-btn {
+      background: var(--panel-alt);
+      border: 2px solid var(--border);
+      color: var(--text);
+      padding: 10px 12px;
+      border-radius: 10px;
+      text-align: left;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .streams-box { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
+    .stream-badge {
+      display: inline-block;
+      background: rgba(74, 222, 128, 0.15);
+      color: #4ade80;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 20px;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+    .stream-item {
+      background: var(--panel-alt);
+      border: 2px solid var(--border);
+      padding: 12px 16px;
+      border-radius: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+    }
+    #playerOverlay { padding: 0; background: #000; }
+    video { width: 100vw; height: 100vh; background: #000; }
+    #webPlayerFrame {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #000;
+    }
+    .player-hud {
+      position: absolute;
+      bottom: 24px;
+      left: 36px;
+      right: 36px;
+      z-index: 5; /* siempre por encima del iframe de servidores embed */
+      background: rgba(14, 16, 24, 0.9);
+      padding: 16px 22px;
+      border-radius: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border: 1px solid rgba(255,255,255,0.14);
+    }
+    .list-box {
+      background: var(--panel-alt);
+      padding: 14px 18px;
+      border-radius: 12px;
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      border: 1px solid var(--border);
+    }
+    .diag-log {
+      background: #0d1017;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.65;
+      color: #b8c4e0;
+      max-height: 320px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      user-select: text !important;
+    }
+  </style>
+</head>
+<body>
+
+  <aside class="sidebar">
+    <div class="brand">KINO <span>v0.9.79 VIDAA</span></div>
+    <button class="nav-btn focusable active" id="navHome" data-view="home">
+      <span>🏠 Inicio</span>
+    </button>
+    <button class="nav-btn focusable" id="navSearch" data-view="search">
+      <span>🔍 Buscar</span>
+    </button>
+    <button class="nav-btn focusable" id="navPlugins" data-view="plugins">
+      <span>🧩 Tienda Plugins</span>
+      <span class="nav-badge" id="installedCountBadge">0</span>
+    </button>
+    <button class="nav-btn focusable" id="navLive" data-view="livetv">
+      <span>📺 En Vivo</span>
+    </button>
+    <button class="nav-btn focusable" id="navFavs" data-view="favorites">
+      <span>❤️ Mi Biblioteca</span>
+    </button>
+    <button class="nav-btn focusable" id="navSettings" data-view="settings">
+      <span>⚙️ Ajustes / Red</span>
+    </button>
+    <button class="nav-btn focusable" id="navDiag" data-view="diag">
+      <span>🩺 Diagnóstico</span>
+    </button>
+    <button class="nav-btn focusable" id="exitAppBtn">
+      <span>🚪 Salir a VIDAA</span>
+    </button>
+  </aside>
+
+  <main class="main" id="mainView">
+    <div class="header-bar">
+      <h1 class="section-title" id="viewTitle">Inicio</h1>
+      <div class="status-pill" id="statusPill">Listo · Usa las flechas del control remoto y OK</div>
+    </div>
+    <div id="viewContent"></div>
+  </main>
+
+  <!-- Modal de Ficha de Título, Episodios y Servidores -->
+  <div class="overlay" id="detailOverlay">
+    <div class="detail-box">
+      <img id="detailPoster" class="detail-poster" src="https://raw.githubusercontent.com/kinotvapp/kino-plugin-archive/HEAD/icon.png" alt="Poster" />
+      <div class="detail-info">
+        <h2 class="detail-title" id="detailTitle">Título</h2>
+        <div id="detailMeta" style="color: var(--muted); font-size: 15px;"></div>
+        <p class="detail-desc" id="detailDesc"></p>
+        <div class="btn-group">
+          <button class="action-btn focusable" id="playDirectBtn">▶ Resolver y Reproducir</button>
+          <button class="action-btn secondary focusable" id="searchAllPluginsBtn">🔎 Buscar Streams en Plugins</button>
+          <button class="action-btn secondary focusable" id="playNativeBtn">🟡 Abrir en Player Nativo VIDAA</button>
+          <button class="action-btn secondary focusable" id="favToggleBtn">❤️ Favorito</button>
+          <button class="action-btn secondary focusable" id="closeDetailBtn">⬅ Volver</button>
+        </div>
+        <div id="episodesSection" style="margin-top: 18px;"></div>
+        <div id="streamsList" class="streams-box"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal de Configuración de Plugin -->
+  <div class="overlay" id="configOverlay">
+    <div style="max-width: 720px; width: 100%; margin: auto; background: var(--panel); padding: 28px; border-radius: 16px; border: 1px solid var(--border);">
+      <h2 id="configPluginTitle" style="font-size: 24px; margin-bottom: 8px;">Configurar Plugin</h2>
+      <p id="configPluginSub" style="color: var(--muted); font-size: 14px; margin-bottom: 18px;"></p>
+      <div id="configFieldsBox"></div>
+      <div class="btn-group" style="margin-top: 20px;">
+        <button class="action-btn focusable" id="saveConfigBtn">💾 Guardar y Recargar</button>
+        <button class="action-btn secondary focusable" id="closeConfigBtn">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reproductor de Video (HTML5 directo o iframe de servidores embed) -->
+  <div class="overlay" id="playerOverlay">
+    <video id="videoPlayer" controls autoplay playsinline></video>
+    <iframe id="webPlayerFrame" style="display:none;" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+    <div class="player-hud">
+      <div>
+        <div id="nowPlayingTitle" style="font-size: 18px; font-weight: 700;">Reproduciendo...</div>
+        <div id="nowPlayingSub" style="font-size: 13px; color: var(--muted);">Botón Amarillo: Pasar a reproductor nativo VIDAA · Back/Esc: Salir</div>
+      </div>
+      <div class="btn-group">
+        <button class="action-btn blue small focusable" id="playerNextServerBtn">🔄 Siguiente Servidor</button>
+        <button class="action-btn secondary focusable" id="playerNativeHandoffBtn">🟡 Nativo VIDAA</button>
+        <button class="action-btn focusable" id="closePlayerBtn">✖ Cerrar</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // =========================================================================
+    // 1. CATÁLOGO OFICIAL EXTRAÍDO DIRECTAMENTE DE KINO.APK (v0.9.79)
+    // =========================================================================
+    const KINO_SEED_PLUGINS = [{"id": "kino-social", "repo": "kinotvapp/kino-social", "name": "Kino Social", "description": "Una red social pequeña dentro de Kino: cuenta lo que ves, comenta, sigue a otras personas y únete a comunidades.", "tags": ["social", "comunidad", "comentarios"], "categories": ["utilities"]}, {"id": "internet-archive", "repo": "kinotvapp/kino-plugin-archive", "name": "Internet Archive", "description": "Películas de dominio público y televisión clásica de archive.org.", "tags": ["películas", "clásicos", "gratis"]}, {"id": "tmdb", "repo": "kinotvapp/kino-plugin-tmdb", "name": "TMDB", "description": "Catálogo e información de películas y series de TMDB, directo desde tu aparato (Kino 0.9.53 o más nueva).", "tags": ["solo catálogo", "películas", "series"], "categories": ["movies", "series", "utilities"]}, {"id": "own-server", "repo": "kinotvapp/kino-plugin-own-server", "name": "Tu servidor", "description": "Ve el contenido de tu propio servidor de video. Necesita que escribas su dirección.", "tags": ["servidor", "propio"], "needsSetup": true}, {"id": "subtitlecat", "repo": "kinotvapp/kino-plugin-subtitlecat", "name": "SubtitleCat", "description": "Subtítulos listos en muchos idiomas para Buscar subtítulos en línea; la mayoría son traducciones automáticas.", "categories": ["subtitles"]}, {"id": "poster-pro", "repo": "kinotvapp/kino-plugin-poster-pro", "name": "Poster Pro", "description": "Rellena el póster y el fondo que le falte a un título de cualquiera de tus fuentes, con la nota incrustada. No agrega catálogo ni reproduce nada.", "tags": ["pósters", "utilidad"], "categories": ["utilities"]}, {"id": "anifeed", "repo": "Susejing/kino-anifeed", "name": "AniFeed", "description": "Noticias de anime y calendario de emisión semanal con horarios por día, tendencias y próximos estrenos.", "tags": ["anime", "noticias"], "categories": ["anime"]}, {"id": "anitrack", "repo": "Susejing/kino-anitrack", "name": "AniTrack", "description": "Marca tu progreso de anime en AniList y MyAnimeList cada vez que terminas un episodio, desde cualquier fuente.", "tags": ["seguimiento", "anime"], "needsSetup": true, "categories": ["anime", "utilities"]}, {"id": "flixtrack", "repo": "Susejing/kino-flixtrack", "name": "FlixTrack", "description": "Registra lo que terminas de ver en tu historial de Trakt y SIMKL, desde cualquier fuente.", "tags": ["seguimiento", "películas", "series"], "needsSetup": true, "categories": ["movies", "series", "utilities"]}, {"id": "sync-gram", "repo": "kinotvapp/kino-plugin-sync-gram", "name": "Sync-Gram", "description": "Sincroniza tus aparatos de Kino a través de un bot de Telegram que creas tú. No oficial: sin relación con Telegram.", "tags": ["sincronización", "telegram"], "needsSetup": true, "categories": ["utilities"], "requires": ["syncProvider"], "authorKey": "82b87b938e0a95b142467c815a8823cb54310a13a828c3c4c77b1eda43294ae6"}, {"id": "video-gram", "repo": "kinotvapp/kino-plugin-video-gram", "name": "Video-Gram", "description": "Tus videos de Telegram, con tu propio bot o tu cuenta; solo lectura. No oficial: sin relación con Telegram.", "tags": ["telegram", "tus videos"], "needsSetup": true, "categories": ["movies"], "requires": ["socket", "byteSource", "catalog", "imageSource"], "authorKey": "82b87b938e0a95b142467c815a8823cb54310a13a828c3c4c77b1eda43294ae6"}, {"id": "sync-gram-account", "repo": "kinotvapp/kino-plugin-sync-gram-account", "name": "Sync-Gram Cuenta", "description": "Sincroniza tus aparatos de Kino con tu propia cuenta de Telegram, sin bot: la copia queda en tus Mensajes guardados. No oficial: sin relación con Telegram.", "tags": ["sincronización", "telegram"], "needsSetup": true, "categories": ["utilities"], "requires": ["syncProvider", "socket", "storageLarge"], "authorKey": "82b87b938e0a95b142467c815a8823cb54310a13a828c3c4c77b1eda43294ae6"}, {"id": "sync-gdrive", "repo": "kinotvapp/kino-plugin-sync-gdrive", "name": "Kino Sync", "description": "Sincroniza tus aparatos de Kino con tu propio Google Drive: la copia va cifrada y te conectas con un código. Experimental. No oficial: sin relación con Google.", "tags": ["sincronización", "google drive"], "needsSetup": true, "categories": ["utilities"], "requires": ["syncProvider", "screen"]}, {"id": "news", "repo": "kinotvapp/kino-plugin-news", "name": "Solo noticias", "description": "Noticias de las películas y series que viste y de tus temas, en una pantalla propia, desde Google Noticias. No oficial: sin relación con Google.", "tags": ["noticias"], "categories": ["utilities"], "requires": ["screen", "library", "schedule", "shared", "ai"], "authorKey": "82b87b938e0a95b142467c815a8823cb54310a13a828c3c4c77b1eda43294ae6"}, {"id": "watch-party", "repo": "kinotvapp/kino-plugin-watch-party", "name": "Party Chat", "description": "Mira un título con tus amigos, cada quien en su aparato: chat y video sincronizado en una pestaña del reproductor. Todos usan el mismo plugin y el mismo título.", "tags": ["ver juntos", "chat"], "categories": ["utilities"], "requires": ["playerPanelTab", "room", "qrScan", "playerControl"], "authorKey": "82b87b938e0a95b142467c815a8823cb54310a13a828c3c4c77b1eda43294ae6"}, {"id": "opensubtitles-v3", "stremio": "https://opensubtitles-v3.strem.io/manifest.json", "description": "Subtítulos en muchos idiomas para películas y series, de OpenSubtitles.", "categories": ["subtitles"]}, {"id": "subtis", "stremio": "https://stremio.fly.dev/manifest.json", "description": "Subtítulos en español para películas.", "categories": ["subtitles"]}, {"id": "subsense", "stremio": "https://subsense.nepiraw.com/manifest.json", "description": "Busca subtítulos en los idiomas que elijas (hasta cinco, español incluido) en varias fuentes a la vez. Gratis; se configura en su página.", "categories": ["subtitles"]}, {"id": "subtitles-website", "stremio": "https://subtitles.website/stremio/manifest.json", "description": "Más de 630.000 subtítulos en muchos idiomas, español incluido, para películas y series.", "categories": ["subtitles"]}, {"id": "cinemeta", "stremio": "https://v3-cinemeta.strem.io/manifest.json", "tags": ["solo catálogo"], "description": "El catálogo oficial de Stremio: películas y series populares, nuevas y destacadas.", "categories": ["movies", "series", "utilities"]}, {"id": "streaming-catalogs", "stremio": "https://7a82163c306e-stremio-netflix-catalog-addon.baby-beamup.club/manifest.json", "tags": ["solo catálogo"], "description": "Lo que está en tendencia en Netflix, HBO Max, Disney+, Prime Video y más.", "categories": ["movies", "series", "utilities"]}, {"id": "imdb-catalogs", "stremio": "https://1fe84bc728af-imdb-catalogs.baby-beamup.club/manifest.json", "tags": ["solo catálogo"], "description": "Listas de películas y series de IMDb.", "categories": ["movies", "series", "utilities"]}, {"id": "seenr", "stremio": "https://seenr.app/api/v1/stremio/manifest.json", "tags": ["solo catálogo"], "description": "Las películas y series en tendencia en Seenr. Con una cuenta gratis de Seenr suma tus propias listas.", "categories": ["movies", "series", "utilities"]}, {"id": "stremboxd", "stremio": "https://api.stremboxd.com/manifest.json", "tags": ["solo catálogo"], "description": "Letterboxd: las películas populares de la semana y el top 250.", "categories": ["movies", "utilities"]}, {"id": "rotten-tomatoes", "stremio": "https://7a82163c306e-rottentomatoes.baby-beamup.club/manifest.json", "tags": ["solo catálogo"], "description": "Películas «Certified Fresh» y series mejor calificadas de Rotten Tomatoes.", "categories": ["movies", "series", "utilities"]}, {"id": "film-festivals", "stremio": "https://stremio-film-festivals.elfhosted.com/manifest.json", "tags": ["solo catálogo"], "description": "Las ganadoras de Cannes, Venecia, Berlín, Sundance, San Sebastián y otros festivales de cine.", "categories": ["movies", "utilities"]}, {"id": "mubi", "stremio": "https://mubi2stremio.adiba.ro/manifest.json", "tags": ["solo catálogo"], "description": "Las películas nuevas de MUBI: cine de autor y clásico.", "categories": ["movies", "utilities"]}, {"id": "cinema-time-machine", "stremio": "https://9662a158fccb-cinema-time-machine.baby-beamup.club/manifest.json", "tags": ["solo catálogo"], "description": "Elige un año y mira las películas y series que se veían entonces.", "categories": ["movies", "series", "utilities"]}, {"id": "marvel", "stremio": "https://addon-marvel.onrender.com/manifest.json", "tags": ["solo catálogo"], "description": "Todo Marvel: el MCU en orden cronológico o de estreno, X-Men, películas, series y animación.", "categories": ["movies", "series", "utilities"]}, {"id": "star-wars", "stremio": "https://addon-star-wars-u9e3.onrender.com/manifest.json", "tags": ["solo catálogo"], "description": "Star Wars por sagas, eras y series, en orden cronológico o de estreno.", "categories": ["movies", "series", "utilities"]}, {"id": "dc-universe", "stremio": "https://addon-dc-cq85.onrender.com/manifest.json", "tags": ["solo catálogo"], "description": "El universo DC: películas, series y animación de Batman, Superman y más, en orden.", "categories": ["movies", "series", "utilities"]}, {"id": "james-bond", "stremio": "https://addon-007.vercel.app/manifest.json", "tags": ["solo catálogo"], "description": "Las 25 películas oficiales de James Bond, en orden de estreno.", "categories": ["movies", "utilities"]}, {"id": "anime-kitsu", "stremio": "https://anime-kitsu.strem.fun/manifest.json", "tags": ["solo catálogo"], "description": "Catálogo de anime de Kitsu: en tendencia, en emisión, más populares y mejor calificados.", "categories": ["anime", "utilities"]}, {"id": "anime-catalogs", "stremio": "https://1fe84bc728af-stremio-anime-catalogs.baby-beamup.club/manifest.json", "tags": ["solo catálogo"], "description": "Listas de anime de MyAnimeList, AniList, Kitsu, AniDB y más. Eliges cuáles en su página.", "categories": ["anime", "utilities"]}, {"id": "animes-season", "stremio": "https://victorgveloso.github.io/animes-season-addon/manifest.json", "tags": ["solo catálogo"], "description": "El anime de la temporada: las series y películas más recientes.", "categories": ["anime", "utilities"]}, {"id": "dragonball-es", "stremio": "https://yancha10.github.io/stremio-dragonball-es-catalog/manifest.json", "tags": ["solo catálogo"], "description": "Dragon Ball en español en orden para verlo: series, películas, especiales y OVAs.", "categories": ["anime"]}, {"id": "pluto-tv", "stremio": "https://dev.nebulawp.org/stremio/pluto-tv-addon/manifest.json", "description": "Cientos de canales en vivo gratis de Pluto TV, con anuncios.", "categories": ["live"]}, {"id": "radios", "stremio": "https://1fe84bc728af-stremio-radios.baby-beamup.club/manifest.json", "description": "Más de 90.000 emisoras de radio por internet, del directorio SHOUTcast.", "categories": ["radio"]}];
+    const KINO_COMMUNITY_STORE = [{"address": "YojaTV-kino/YojaTV_plugin", "id": "yoja-tv-kino", "name": "YojaTV-alpha", "description": "Plugin de YojaTV para Kino TV. Películas de cine en español latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.", "categories": ["movies", "series", "anime", "live"], "version": "8.0.1", "author": "JuandreXter, YojanderGaming, einer_bg", "icon": "https://raw.githubusercontent.com/YojaTV-kino/YojaTV_plugin/HEAD/icon.png", "popularity": 14, "updatedAt": 1792967520000, "signed": true, "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3"}, {"address": "kinotvapp/kino-plugin-archive", "id": "archive-org", "name": "Internet Archive", "description": "Películas de dominio público y televisión clásica de archive.org", "categories": ["movies", "series"], "version": "1.4.2", "author": "kinotvapp", "icon": "https://raw.githubusercontent.com/kinotvapp/kino-plugin-archive/HEAD/icon.png", "popularity": 4, "updatedAt": 1793239443000}, {"address": "ice-dev-x/kino-iptv-org-clean", "id": "iptv-org", "name": "TV+", "description": "Canales en vivo: Latino, España, USA y más", "categories": ["movies", "live"], "version": "1.7.0", "author": "ice-dev-x", "icon": "https://raw.githubusercontent.com/ice-dev-x/kino-iptv-org-clean/HEAD/icon.png", "popularity": 3, "updatedAt": 1792521673000}, {"address": "JuanDEVYT/YTMusic_plugin", "id": "ytmusic", "name": "YouTube Music", "description": "Música de YouTube Music con tema rojo: busca canciones, álbumes, listas y artistas, explora tendencias y géneros y descarga; con tu sesión ves tus Me gusta y tus listas", "categories": ["movies", "series"], "version": "0.5.2", "author": "JuanDEVYT", "icon": "https://raw.githubusercontent.com/JuanDEVYT/YTMusic_plugin/HEAD/icon.png", "popularity": 2, "updatedAt": 1791812022000}, {"address": "JuanDEVYT/kino-plugin-tvlatam", "id": "tv-latam-lista", "name": "TV Latam", "description": "144 canales en vivo de Latinoamérica, España y canales internacionales, agrupados por género. Trae una copia de la lista y puede actualizarla desde una dirección opcional.", "categories": ["movies", "live"], "version": "0.1.0", "popularity": 1, "updatedAt": 1792888556000}, {"address": "kinotvapp/kino-plugin-own-server", "id": "own-server", "name": "Tu servidor", "description": "Ve el contenido de tu propio servidor de video, con sus canales y subtítulos, y cuéntale qué ves. Necesita que escribas su dirección.", "categories": ["movies", "series", "live", "subtitles", "utilities"], "version": "1.5.0", "author": "kinotvapp", "icon": "https://raw.githubusercontent.com/kinotvapp/kino-plugin-own-server/HEAD/icon.png", "popularity": 1, "updatedAt": 1793239447000}, {"address": "cuentademo051092/kino-plugin-tdtchannels", "id": "tdtchannels", "name": "TDTChannels", "description": "Canales de TV en abierto de TDTChannels en la pestaña En vivo.", "categories": ["movies", "live"], "version": "0.2.5", "author": "Cuenta Demo", "icon": "https://raw.githubusercontent.com/cuentademo051092/kino-plugin-tdtchannels/HEAD/icon.png", "popularity": 1, "updatedAt": 1792338280000}, {"address": "stanpx/kino-plugin-archivo-rta", "id": "archivo-rta", "name": "Archivo RTA", "description": "Contenido histórico de Radio y Televisión Argentina", "categories": ["movies", "series"], "version": "0.1.2", "author": "stanpx", "icon": "https://raw.githubusercontent.com/stanpx/kino-plugin-archivo-rta/HEAD/icon.png", "popularity": 1, "updatedAt": 1792861542000, "signed": true, "authorKey": "6f5fc734f744d974a1fe0c21a0e7edf6e0c9ff2e35a01ffc12d9abad629d55ef"}, {"address": "baskettv23/kino-plugin-m3u", "id": "mis-listas-m3u", "name": "Mis Listas M3U", "description": "Agrega tus propias listas M3U (con guía EPG opcional) y mira tus canales en vivo, agrupados y con logos, dentro de Kino.", "categories": ["live", "utilities"], "version": "1.0.0", "author": "baskettv23", "popularity": 1, "updatedAt": 1791772881000}, {"address": "baskettv23/Framextv", "id": "framextv", "name": "FrameXTV", "description": "Películas y series de frameXTV: servidores CineJoy y Movy, hasta en 4K, en tu idioma", "categories": ["movies", "series"], "version": "0.1.0", "author": "baskettv23", "icon": "https://raw.githubusercontent.com/baskettv23/Framextv/HEAD/icon.png", "popularity": 1, "updatedAt": 1792440118000}, {"address": "protaxiogenao-oss/Kino-plug-hejk", "id": "hentaijk", "name": "HentaiJK", "description": "Hecho por Hotaru Yume. HentaiJK: episodios nuevos, más votados y géneros sin duplicados. Todos los capítulos por serie, selector de servidor.", "categories": ["adult", "anime", "series"], "version": "1.4.0", "author": "Hotaru Yume", "icon": "https://raw.githubusercontent.com/protaxiogenao-oss/Kino-plug-hejk/HEAD/icon.png", "popularity": 1, "updatedAt": 1793252485000}, {"address": "xuper-plugin/kino-plugin-cinehdplus", "id": "cinehdplus", "name": "CineHD Plus", "description": "Películas y series en español latino o castellano de cinehdplus.org: sección propia, géneros, populares, mejor valoradas, búsqueda y varios servidores por título.", "categories": ["movies", "series"], "version": "0.1.3", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-cinehdplus/HEAD/icon.png", "popularity": 1, "updatedAt": 1792721894000}, {"address": "ice-dev-x/iflix", "id": "iflix", "name": "iFlix", "description": "Películas, series, animes y doramas", "categories": ["movies", "series"], "version": "1.2.2", "author": "sadmachine", "icon": "https://raw.githubusercontent.com/ice-dev-x/iflix/HEAD/icon.png", "popularity": 1, "updatedAt": 1792174339000}, {"address": "baskettv23/Pelispro", "id": "pelispro", "name": "PelisPro", "description": "Películas y series de pelispro.net en HD, con reproducción en línea (Latino/Castellano).", "categories": ["movies", "series"], "version": "1.0.1", "author": "Basketboy23", "popularity": 1, "updatedAt": 1791902675000}, {"address": "baskettv23/Gnula", "id": "gnula", "name": "Gnula", "description": "Películas y anime en español desde gnula.one: estrenos, HD y subtítulos, con varios servidores por película (Cuevana, Voe, Filemoon y más). Si una película no está en Gnula, la busca en CineHax, Cinecalidad y Pelishax y reproduce desde sus servidores.", "categories": ["movies", "anime"], "version": "1.0.0", "author": "baskettv23", "icon": "https://raw.githubusercontent.com/baskettv23/Gnula/HEAD/icon.png", "popularity": 1, "updatedAt": 1792278045000}, {"address": "Susejing/kino-plugin-Jkanime", "id": "jkanime-net", "name": "Jkanime", "description": "Anime Sub desde jkanime.net", "categories": ["movies"], "version": "1.0.0", "author": "Susejing", "icon": "https://raw.githubusercontent.com/Susejing/kino-plugin-Jkanime/HEAD/icon.png", "popularity": 1, "updatedAt": 1791694901000}, {"address": "kinotvapp/kino-plugin-archive-audio", "id": "archive-audio", "name": "Internet Archive Audio", "description": "Música libre, conciertos en vivo, audiolibros y radio antigua de archive.org", "categories": ["movies", "series"], "version": "1.0.0", "author": "kinotvapp", "icon": "https://raw.githubusercontent.com/kinotvapp/kino-plugin-archive-audio/HEAD/icon.png", "popularity": 1, "updatedAt": 1792423962000, "signed": true, "authorKey": "82b87b938e0a95b142467c815a8823cb54310a13a828c3c4c77b1eda43294ae6"}, {"address": "baskettv23/Latinomegahd", "id": "latinomegahd", "name": "LatinoMegaHD", "description": "Películas y series en español latino", "categories": ["movies", "series"], "version": "0.1.0", "popularity": 1, "updatedAt": 1792814567000}, {"address": "elmendezz/kino-plugin-pluto", "id": "pluto-tv", "name": "Mendezino TV", "description": "Canales en vivo de Pluto TV, Samsung TV Plus y Roku TV", "categories": ["movies", "live"], "version": "2.3.4", "author": "elmendezz", "icon": "https://raw.githubusercontent.com/elmendezz/kino-plugin-pluto/HEAD/icon.png", "popularity": 1, "updatedAt": 1790793087000}, {"address": "syberia1/tioanime", "id": "tioanime", "name": "TioAnime", "description": "Anime subtitulado en español de TioAnime, con los servidores Voe y YourUpload.", "categories": ["anime"], "version": "1.8.3", "author": "tu-usuario-de-github", "popularity": 1, "updatedAt": 1791830947000}, {"address": "syberia1/MonosChinos", "id": "monoschinos", "name": "MonosChinos", "description": "Anime subtitulado de monoschinos.st: En emisión, animes y películas, con carátulas de TMDB y AniList. Servidores: MixDrop, Mp4Upload, LuluStream, Uqload, Ok.ru, ObeyWish, Doodstream, Voe, Filemoon, SaveFiles y Hexload.", "categories": ["anime"], "version": "4.0.0", "author": "Syberia", "icon": "https://raw.githubusercontent.com/syberia1/MonosChinos/HEAD/icon.png", "popularity": 1, "updatedAt": 1792356684000}, {"address": "xuper-plugin/kino-plugin-vampi-tv", "id": "vampi-tv", "name": "Vampi TV", "description": "Canales de TV en vivo desde listas M3U, agrupados por categorías: trae una lista pública lista para usar y acepta las tuyas, con guía opcional.", "categories": ["live"], "version": "0.1.0", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-vampi-tv/HEAD/icon.png", "popularity": 1, "updatedAt": 1792990102000}, {"address": "JuanDEVYT/cinehax-plus", "id": "cinehax-plus", "name": "CineHax+", "description": "Creado por JuandreXter - Películas y series en español latino de CineHax+", "categories": ["movies", "series"], "version": "0.3.5", "icon": "https://raw.githubusercontent.com/JuanDEVYT/cinehax-plus/HEAD/icon.png", "popularity": 1, "updatedAt": 1793145904000, "signed": true, "authorKey": "f9e9967038ad5b85443c1c990f4f053df85012583cdeb63d097eac19a0e78cea"}, {"address": "myne23/donghuas-sub-es", "id": "donghuas-sub-es", "name": "Donghuas Sub ES", "description": "Donghua subtitulado al español en Kino. Explora series y episodios de SeriesDonghua y MundoDonghua, con búsqueda combinada y múltiples servidores de reproducción.", "categories": ["anime"], "version": "0.1.70", "author": "myne23", "popularity": 1, "updatedAt": 1792771142000}, {"address": "xuper-plugin/kino-plugin-deepflix", "id": "deepflix", "name": "DeepFlix", "description": "Películas y series en español latino, a través de DeepFlix.", "categories": ["movies", "series"], "version": "1.1.1", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-deepflix/HEAD/icon.png", "popularity": 1, "updatedAt": 1792353876000}, {"address": "Rayoapp5/cinema-plus", "id": "lo-mas-visto", "name": "Lo más visto", "description": "Las series más vistas del momento, actualizadas cada vez que Kino refresca el inicio", "categories": ["movies", "series"], "version": "0.1.0", "author": "Rayoapp5", "popularity": 1, "updatedAt": 1793117908000}, {"address": "xuper-plugin/kino-plugin-caracol-tv", "id": "caracol-tv", "name": "Caracol TV", "description": "Series, películas y canales en vivo de Caracol Streaming. Solo funciona en Colombia.", "categories": ["movies", "series", "live"], "version": "1.0.3", "author": "kinotvapp", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-caracol-tv/HEAD/icon.png", "popularity": 1, "updatedAt": 1792985225000}, {"address": "xuper-plugin/kino-plugin-seriesmetro", "id": "seriesmetro", "name": "SeriesMetro", "description": "Películas y series en latino, castellano o subtituladas, a través de SeriesMetro.", "categories": ["movies", "series"], "version": "1.0.1", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-seriesmetro/HEAD/icon.png", "popularity": 1, "updatedAt": 1792360879000}, {"address": "ice-dev-x/c_plus", "id": "cuevana-plus", "name": "Cuevana+", "description": "Películas y series, versión mejorada del anterior plugin de Cuevana, con reproducción en línea (Latino/Castellano/Subtitulado).", "categories": ["movies", "series"], "version": "1.2.9", "author": "dev", "icon": "https://raw.githubusercontent.com/ice-dev-x/c_plus/HEAD/icon.png", "popularity": 1, "updatedAt": 1793282797000}, {"address": "xuper-plugin/kino-plugin-lacartoons", "id": "lacartoons", "name": "LA Cartoons Plus", "description": "Dibujos animados clásicos doblados al español de lacartoons.com: por cadena (Nickelodeon, Cartoon Network, Disney…), con sección propia, categorías, temporadas y capítulos.", "categories": ["series"], "version": "0.1.3", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-lacartoons/HEAD/icon.png", "popularity": 1, "updatedAt": 1792720166000}, {"address": "xuper-plugin/kino-plugin-seriesflix", "id": "seriesflix", "name": "Seriesflix", "description": "Series en latino, castellano o subtituladas, a través de Seriesflix.", "categories": ["series"], "version": "1.0.1", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-seriesflix/HEAD/icon.png", "popularity": 1, "updatedAt": 1792360876000}, {"address": "efraynns-stack/Kinoiptv", "id": "psxtv", "name": "PSXtv", "description": "Canales chilenos con la lista de m3u.cl activada por defecto. También puedes cargar tus propias listas IPTV M3U desde la configuración.", "categories": ["movies", "live"], "version": "0.2.1", "author": "PSXtv", "popularity": 1, "updatedAt": 1791354999000}, {"address": "xuper-plugin/kino-plugin-cablevisionhd", "id": "cablevisionhd", "name": "CablevisionHD", "description": "TV en vivo de CablevisionHD: unos 70 canales de deportes, entretenimiento, noticias, películas, infantil y educación, con sección propia, categorías, búsqueda y varias opciones de señal por canal.", "categories": ["live"], "version": "0.3.1", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-cablevisionhd/HEAD/icon.png", "popularity": 1, "updatedAt": 1792714674000}, {"address": "ice-dev-x/pelis-juanita", "id": "pelis-juanita", "name": "Premiere", "description": "Peliculas y series; se puede elegir el idioma y subtitulos desde el botón (cc) en caso de que este disponible", "categories": ["movies", "series"], "version": "0.2.4", "author": "sadmachine", "icon": "https://raw.githubusercontent.com/ice-dev-x/pelis-juanita/HEAD/icon.png", "popularity": 1, "updatedAt": 1792452936000}, {"address": "cuentademo051092/kino-plugin-SrRegiotv", "id": "sr-regio-tv", "name": "Sr. Regio TV", "description": "TV en vivo con la lista TV 1 de Sr. Regio, por categorías y sin la publicidad del creador. Busca sola la clave nueva.", "categories": ["movies", "live"], "version": "0.4.5", "icon": "https://raw.githubusercontent.com/cuentademo051092/kino-plugin-SrRegiotv/HEAD/icon.png", "popularity": 1, "updatedAt": 1792377482000}, {"address": "stanpx/ajplus", "id": "ajplus", "name": "AJ+", "description": "Canales de noticias, reportajes, documentales y transmisiones en vivo de Al Jazeera y AJ+ en Español, Inglés, Árabe, Portugués, Francés, Urdú y Balcanes con guía EPG.", "categories": ["movies", "series", "live"], "version": "1.0.4", "author": "stanpx", "icon": "https://raw.githubusercontent.com/stanpx/ajplus/HEAD/icon.png", "popularity": 1, "updatedAt": 1793239710000, "signed": true, "authorKey": "6f5fc734f744d974a1fe0c21a0e7edf6e0c9ff2e35a01ffc12d9abad629d55ef"}, {"address": "cuentademo051092/kino-plugin-boliviatv", "id": "bolivia-tv", "name": "Bolivia TV", "description": "55 canales de Bolivia (televisión, deportes y universitarios), lista fija guardada dentro del plugin.", "categories": ["movies", "live"], "version": "1.0.3", "icon": "https://raw.githubusercontent.com/cuentademo051092/kino-plugin-boliviatv/HEAD/icon.png", "popularity": 1, "updatedAt": 1792357839000}, {"address": "xuper-plugin/kino-plugin-cuevanapro", "id": "cuevanapro", "name": "Cuevana Pro", "description": "Películas y series en español latino, castellano o en su idioma original de Cuevana (cuevana3.eu): sección propia, géneros, estrenos, tendencias, búsqueda y varios servidores por título.", "categories": ["movies", "series"], "version": "0.1.6", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-cuevanapro/HEAD/icon.png", "popularity": 1, "updatedAt": 1792987357000}, {"address": "JuanDEVYT/FuegoCine_plugin", "id": "fuegocine", "name": "FuegoCine", "description": "Películas y series en español de fuegocine.com: búsqueda con relevancia, secciones por género, episodios, stream con servidores alternativos y caché.", "categories": ["movies", "series"], "version": "2.0.0", "author": "JuanDEVYT", "icon": "https://raw.githubusercontent.com/JuanDEVYT/FuegoCine_plugin/HEAD/icon.png", "popularity": 1, "updatedAt": 1791693621000}, {"address": "xuper-plugin/kino-plugin-xuper", "id": "xuper", "name": "Xuper", "description": "", "categories": ["movies", "series", "anime", "live"], "version": "2.3.3", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-xuper/HEAD/icon.png", "popularity": 1, "updatedAt": 1793293672000}, {"address": "xuper-plugin/kino-plugin-nauta", "id": "nauta-live-tv", "name": "Nauta Live TV", "description": "Canales de TV en vivo de Argentina, deportes, películas 24/7, infantiles, noticias y más", "categories": ["live"], "version": "1.2.1", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-nauta/HEAD/icon.png", "popularity": 1, "updatedAt": 1791897072000}, {"address": "xuper-plugin/kino-plugin-pelispedia", "id": "pelispedia", "name": "Pelispedia", "description": "Películas y series en español latino, castellano o subtituladas de pelispedia.is: sección propia, géneros, búsqueda y varias opciones por título.", "categories": ["movies", "series"], "version": "0.1.2", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-pelispedia/HEAD/icon.png", "popularity": 1, "updatedAt": 1792720158000}, {"address": "xuper-plugin/kino-plugin-serieskao", "id": "serieskao", "name": "SeriesKao", "description": "Series, anime, doramas y películas en español de serieskao.top: sección propia, géneros, búsqueda, episodios y varios servidores por título.", "categories": ["movies", "series"], "version": "0.1.1", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-serieskao/HEAD/icon.png", "popularity": 1, "updatedAt": 1793018727000}, {"address": "kinotvapp/kino-plugin-poster-pro", "id": "poster-pro", "name": "Poster Pro", "description": "Rellena el póster (y el fondo) que le falte a un título de cualquiera de tus fuentes, con la nota incrustada. No agrega catálogo, no reproduce nada y no pide cuenta: solo entra cuando falta una imagen.", "categories": ["utilities"], "version": "1.0.0", "author": "Kino", "icon": "https://raw.githubusercontent.com/kinotvapp/kino-plugin-poster-pro/HEAD/icon.png", "popularity": 1, "updatedAt": 1792712646000}, {"address": "stanpx/kino-plugin-frikiseries", "id": "frikiseries", "name": "Frikiseries", "description": "Series retro, anime de los 80s y 90s, dibujos animados y películas clásicas", "categories": ["movies", "series", "anime"], "version": "0.1.2", "author": "stanpx", "icon": "https://raw.githubusercontent.com/stanpx/kino-plugin-frikiseries/HEAD/icon.png", "popularity": 1, "updatedAt": 1792884132000, "signed": true, "authorKey": "6f5fc734f744d974a1fe0c21a0e7edf6e0c9ff2e35a01ffc12d9abad629d55ef"}, {"address": "YxhelZvl/plugin-lacartoons", "id": "lacartoons-source", "name": "LACartoons", "description": "Series animadas clásicas en español latino: búscalas, explóralas por canal y reproduce sus episodios.", "categories": ["series"], "version": "1.1.0", "author": "YxhelZvl", "icon": "https://raw.githubusercontent.com/YxhelZvl/plugin-lacartoons/HEAD/icon.png", "popularity": 1, "updatedAt": 1791353639000, "signed": true, "authorKey": "c8293e9940736e78506273ed41508bd39e93b7fb9434051e30f9767354dd3018"}, {"address": "LifReizei/K-Av1", "id": "animeav1-improved", "name": "AnimeAV1 Improved", "description": "Anime en español latino (y subtitulado si no hay) desde animeav1.com, con catálogo en Inicio y Categorías. Prueba Voe, UPNShare, MP4Upload, YourUpload y StreamTape hasta encontrar uno que reproduzca.", "categories": ["anime"], "version": "2.4.0", "author": "LifReizei", "icon": "https://raw.githubusercontent.com/LifReizei/K-Av1/HEAD/icon.png", "popularity": 1, "updatedAt": 1792865479000}, {"address": "cuentademo051092/kino-plugin-radio", "id": "radio-latam", "name": "Radio en vivo", "description": "Radios en vivo: Radio Disney de cada país, Bolivia (con las de Santa Cruz), Latinoamérica, Estados Unidos y España, y una categoría de anime.", "categories": ["movies", "live"], "version": "0.6.1", "icon": "https://raw.githubusercontent.com/cuentademo051092/kino-plugin-radio/HEAD/icon.png", "popularity": 1, "updatedAt": 1792339029000}, {"address": "mikiosh/kino-cine-lgbt", "id": "cine-lgbt-catalogo", "name": "Cine LGBT", "description": "Películas LGBT: populares, recientes, romance, drama, comedia y documentales. Catálogo TMDB para buscar dónde verlas con tus otros plugins. Requiere Kino 0.9.54 o posterior.", "categories": ["utilities"], "version": "0.1.0", "popularity": 1, "updatedAt": 1792173039000}, {"address": "Susejing/Tubekino", "id": "tubekino", "name": "TubeKino — YouTube", "description": "Busca y reproduce videos, listas y canales de YouTube con triple estrategia: extracción directa, respaldo en servidores de la comunidad (instancias de Invidious) para la calidad alta, y el navegador oculto que ejecuta la página real. Acepta enlaces pegados en el buscador.", "categories": ["movies", "series"], "version": "0.3.23", "icon": "https://raw.githubusercontent.com/Susejing/Tubekino/HEAD/icon.png", "popularity": 1, "updatedAt": 1792397427000}, {"address": "myne23/mgdede", "id": "megadede", "name": "Megadede", "description": "Películas y series de Megadede en Kino. Explora el catálogo, consulta episodios y elige entre los servidores disponibles para reproducir.", "categories": ["movies", "series", "anime"], "version": "0.1.19", "author": "myne23", "popularity": 1, "updatedAt": 1792774659000}, {"address": "efraynns-stack/TokuKino", "id": "unlimitedsubs", "name": "Toku Kino", "description": "Super Sentai, Kamen Rider y Tokusatsu de ShadowRangers, por serie y año, con VOE y ShadowLiv. Requiere Kino 0.9.55 o superior.", "categories": ["series"], "version": "0.3.5", "popularity": 1, "updatedAt": 1791943733000}, {"address": "protaxiogenao-oss/Kino-plug-cosx", "id": "cosxplay", "name": "CosXplay", "description": "Hecho por Hotaru Yume. Cosplay de cosxplay.com. Solo +18.", "categories": ["adult"], "version": "1.2.0", "author": "Hotaru Yume", "icon": "https://raw.githubusercontent.com/protaxiogenao-oss/Kino-plug-cosx/HEAD/icon.png", "popularity": 1, "updatedAt": 1793254564000}, {"address": "xuper-plugin/kino-plugin-plaviohd", "id": "plaviohd", "name": "PlavioHD", "description": "Películas y series en HD (audio en inglés o hindi) y deportes en vivo del addon PlavioHD. Catálogo con TMDB, enlaces del addon.", "categories": ["movies", "series"], "version": "1.1.1", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-plaviohd/HEAD/icon.png", "popularity": 1, "updatedAt": 1792986742000}, {"address": "xuper-plugin/kino-plugin-cncverse", "id": "cncverse", "name": "CNCVerse", "description": "Puente al servidor CNCVerse (protocolo de Stremio): el servidor mantiene catálogos y fuentes, Kino solo los muestra.", "categories": ["movies", "series", "live"], "version": "2.0.0", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-cncverse/HEAD/icon.png", "popularity": 1, "updatedAt": 1792682940000}, {"address": "xuper-plugin/kino-plugin-addon-latam", "id": "addon-latam", "name": "Addon Latam", "description": "Películas y series en español latino con estrenos al día y categorías por género. Catálogo y enlaces del addon Addon Latam.", "categories": ["movies", "series"], "version": "1.2.2", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-addon-latam/HEAD/icon.png", "popularity": 1, "updatedAt": 1792987474000}, {"address": "stanpx/youtube-kino-plugin", "id": "youtube-player", "name": "YouTube Player", "description": "Busca y reproduce videos públicos de YouTube utilizando la API oficial de Google de forma directa.", "categories": ["movies", "series"], "version": "1.2.0", "author": "stanpx", "icon": "https://raw.githubusercontent.com/stanpx/youtube-kino-plugin/HEAD/icon.png", "popularity": 1, "updatedAt": 1792118177000, "signed": true, "authorKey": "6f5fc734f744d974a1fe0c21a0e7edf6e0c9ff2e35a01ffc12d9abad629d55ef"}, {"address": "xuper-plugin/kino-plugin-eclipsia", "id": "eclipsia", "name": "Eclipsia", "description": "Catálogo TMDB con streams Vidlink — películas y series hasta 4K", "categories": ["movies", "series"], "version": "0.2.1", "author": "xuper-plugin", "popularity": 1, "updatedAt": 1792986885000}, {"address": "xuper-plugin/maraton", "id": "maraton", "name": "PelisYSeries", "description": "Series, anime y películas en latino, castellano o subtitulado. El video se busca en tu propio aparato, sin servidores intermedios.", "categories": ["series", "anime", "movies"], "version": "0.6.5", "author": "Equipo PelisYSeries", "icon": "https://raw.githubusercontent.com/xuper-plugin/maraton/HEAD/icon.png", "popularity": 1, "updatedAt": 1791236693000, "signed": true, "authorKey": "6693946bd5c56196960959c4b9665fad5094374bcb85ddb282f8bf762c835263"}, {"address": "xuper-plugin/kino-plugin-multicine", "id": "multicine", "name": "MultiCine", "description": "Películas y series con enlaces de muchas fuentes a la vez: el catálogo viene de TMDB y los enlaces los buscan, en paralelo, los scrapers de un repositorio de Nuvio. Experimento.", "categories": ["movies", "series"], "version": "0.8.4", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-multicine/HEAD/icon.png", "popularity": 1, "updatedAt": 1792773638000}, {"address": "xuper-plugin/mubis", "id": "mubis-hd", "name": "Mubis HD", "description": "Películas, series y TV en vivo en HD: catálogo, búsqueda, fichas, episodios y guía de canales.", "categories": ["movies", "series", "live"], "version": "0.3.4", "author": "kinotvapp", "icon": "https://raw.githubusercontent.com/xuper-plugin/mubis/HEAD/icon.png", "popularity": 1, "updatedAt": 1792261788000}, {"address": "sebasmc214-ship-it/kino_plugin_moviezone", "id": "moviezone", "name": "MovieZone", "description": "Películas, series y anime de todos los géneros en español", "categories": ["movies", "series"], "version": "0.1.0", "icon": "https://raw.githubusercontent.com/sebasmc214-ship-it/kino_plugin_moviezone/HEAD/icon.png", "popularity": 1, "updatedAt": 1792710312000, "signed": true, "authorKey": "c854d228f76e82903e20604bd7fd5ca35b0e7d9eb8dacbd138bd209533c7170c"}, {"address": "xuper-plugin/kino-plugin-nuvio-sports", "id": "nuvio-sports", "name": "Nuvio Sports", "description": "Deportes en vivo, próximos eventos y canales deportivos 24/7 del agregador Nuvio Live Sports, en la pestaña En vivo.", "categories": ["movies", "live"], "version": "1.1.2", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-nuvio-sports/HEAD/icon.png", "popularity": 1, "updatedAt": 1792983121000}, {"address": "gregortt1/kino-rpdb-catalog", "id": "rpdb-catalog", "name": "PosterX", "description": "Catálogo de TMDB con la nota incrustada en los pósters, los fondos y los fotogramas de capítulo: tendencias, populares, mejor valoradas, anime, documentales, infantil, doramas y géneros. Rellena el póster de los títulos de tus otras fuentes, no reproduce nada y no pide cuenta ni registro.", "categories": ["movies", "series"], "version": "1.31.0", "author": "gregortt1", "icon": "https://raw.githubusercontent.com/gregortt1/kino-rpdb-catalog/HEAD/icon.png", "popularity": 1, "updatedAt": 1793271219000}, {"address": "xuper-plugin/kino-plugin-areadocumental", "id": "area-documental", "name": "Area Documental", "description": "Más de 2.000 documentales en español de area-documental.com: sección propia, 24 temas, series con sus capítulos, búsqueda y subtítulos.", "categories": ["movies", "series"], "version": "0.2.2", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-areadocumental/HEAD/icon.png", "popularity": 1, "updatedAt": 1792720168000}, {"address": "xuper-plugin/kino-plugin-tvenvivo", "id": "tvenvivo", "name": "TV en Vivo", "description": "Canales de TV en vivo de tvenvivo.org dentro de Kino: deportes, TV abierta de Latinoamérica, cine, documentales e infantil, con sección propia, categorías y búsqueda.", "categories": ["live"], "version": "0.1.0", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-tvenvivo/HEAD/icon.png", "popularity": 1, "updatedAt": 1792715866000}, {"address": "xuper-plugin/kino-plugin-futbol-libre", "id": "futbol-libre", "name": "Fútbol Libre", "description": "Partidos de hoy y canales deportivos en vivo con agenda, varios servidores de respaldo y sitios espejo que se prueban solos si uno falla.", "categories": ["live"], "version": "0.1.3", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-futbol-libre/HEAD/icon.png", "popularity": 1, "updatedAt": 1792984626000}, {"address": "mikiosh/kino-plataformas", "id": "plataformas-catalogo", "name": "Catálogo Plataformas", "description": "Películas y series por plataforma y país, con sección LGBT+. Incluye 39 plataformas precargadas y directorio ampliable con una llave TMDB propia. Solo catálogo: usa tus otros plugins para reproducir.", "categories": ["utilities", "series"], "version": "0.1.0", "popularity": 1, "updatedAt": 1792174922000}, {"address": "xuper-plugin/kino-plugin-embed69", "id": "embed69", "name": "Embed 69", "description": "Películas y series en latino, castellano o subtituladas, a través de Embed 69.", "categories": ["movies", "series"], "version": "1.1.0", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-embed69/HEAD/icon.png", "popularity": 1, "updatedAt": 1792361430000}, {"address": "kinotvapp/kino-plugin-watch-party", "id": "watch-party", "name": "Party Chat", "description": "Mira un título con tus amigos, cada quien en su aparato: una pestaña en el reproductor con chat, reacciones y el video sincronizado. Entra con un código de 5 números o con su QR. (Party Chat: watch a title together, with a chat and the video in sync.)", "categories": ["utilities"], "version": "1.1.2", "author": "kinotvapp", "icon": "https://raw.githubusercontent.com/kinotvapp/kino-plugin-watch-party/HEAD/icon.png", "popularity": 1, "updatedAt": 1793289029000, "signed": true, "authorKey": "82b87b938e0a95b142467c815a8823cb54310a13a828c3c4c77b1eda43294ae6"}, {"address": "baskettv23/Pelispanda", "id": "pelispanda", "name": "Pelispanda", "description": "Películas, series y animes de pelispanda.org en HD, con reproducción en línea (Latino/Castellano).", "categories": ["movies", "series", "anime"], "version": "1.0.2", "author": "Basketboy23", "icon": "https://raw.githubusercontent.com/baskettv23/Pelispanda/HEAD/icon.png", "popularity": 1, "updatedAt": 1791681548000}, {"address": "kinotvapp/kino-plugin-sync-gram-account", "id": "sync-gram-account", "name": "Sync-Gram Cuenta", "description": "Sincroniza tus aparatos de Kino a través de tu propia cuenta de Telegram, sin bot: la copia queda fijada en tus Mensajes guardados. En el celular entras con tu número y un código; la TV recibe la configuración y muestra un código QR. No oficial: sin relación con Telegram. (Unofficial: not affiliated with Telegram.)", "categories": [], "version": "1.2.1", "author": "Kino", "icon": "https://raw.githubusercontent.com/kinotvapp/kino-plugin-sync-gram-account/HEAD/icon.png", "popularity": 1, "updatedAt": 1793204994000, "signed": true, "authorKey": "82b87b938e0a95b142467c815a8823cb54310a13a828c3c4c77b1eda43294ae6"}, {"address": "stanpx/brics-tv", "id": "brics-tv", "name": "BRICS TV (Otro mundo)", "description": "Señales de TV internacionales de acceso público: noticias y cultura de los países BRICS y otros medios soberanos. Incluye TV BRICS (Español e Inglés), RT, Telesur, CGTN, Canal 22, Cubavisión, TV Brasil, Al Jazeera, TRT World, Qatar TV, PressTV, HispanTV, IRIB (1, 2, 3, 4 y Mostanad), Nile TV, SABC News y más.", "categories": ["live"], "version": "0.1.5", "author": "stanpx", "icon": "https://raw.githubusercontent.com/stanpx/brics-tv/HEAD/icon.png", "popularity": 1, "updatedAt": 1792984443000, "signed": true, "authorKey": "5dd7d359836206165abcf91bd1a8ebb4c1ce1e8fc1e665a7bf31d3b10ad13f44"}, {"address": "damiandaqsk-netizen/kino-mi-xtream", "id": "mi-xtream", "name": "Mi Xtream", "description": "Tu TV en vivo, películas y series desde tu propio servidor Xtream, cargados por categorías para no atascar las listas.", "categories": ["live", "movies", "series"], "version": "1.3.1", "popularity": 1, "updatedAt": 1792899162000}, {"address": "xuper-plugin/kino-plugin-doramasyt", "id": "doramasyt", "name": "DoramasYT", "description": "Doramas asiáticos en español (latino, castellano o subtitulados) de doramasyt.com: sección propia, géneros, en emisión, películas y búsqueda.", "categories": ["series", "movies"], "version": "0.2.2", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-doramasyt/HEAD/icon.png", "popularity": 1, "updatedAt": 1792720163000}, {"address": "ghosti-vc/Top-streming", "id": "top-streming", "name": "Top Streming", "description": "Lo más visto de Netflix, HBO Max, Disney+, Prime Video y más: películas y series por país. Solo muestra el catálogo, no reproduce videos.", "categories": ["utilities", "series"], "version": "1.0.0", "author": "Ghosti-vc", "icon": "https://raw.githubusercontent.com/ghosti-vc/Top-streming/HEAD/icon.png", "popularity": 1, "updatedAt": 1793295735000}, {"address": "kinotvapp/kino-plugin-news", "id": "news", "name": "Solo noticias", "description": "Noticias de las películas y series que viste y de tus temas, en tarjetas, desde Google Noticias. Actualización automática e IA opcionales. No oficial: sin relación con Google. (News about what you watched and your own topics, from Google News. Unofficial: not affiliated with Google.)", "categories": ["utilities"], "version": "1.0.2", "author": "kinotvapp", "icon": "https://raw.githubusercontent.com/kinotvapp/kino-plugin-news/HEAD/icon.png", "popularity": 0, "updatedAt": 1793211929000, "signed": true, "authorKey": "82b87b938e0a95b142467c815a8823cb54310a13a828c3c4c77b1eda43294ae6"}, {"address": "protaxiogenao-oss/Kino-plug-iwras", "id": "iwara-tv", "name": "Iwara", "description": "Hecho por Hotaru Yume. Videos de iwara.tv: búsqueda, Inicio, calidad configurable y sesión opcional (privados, suscripciones, favoritos y playlists).", "categories": ["anime", "adult"], "version": "1.5.3", "author": "Hotaru Yume", "icon": "https://raw.githubusercontent.com/protaxiogenao-oss/Kino-plug-iwras/HEAD/icon.png", "popularity": 0, "updatedAt": 1793282980000}, {"address": "Susejing/kino-anifeed", "id": "anifeed", "name": "AniFeed — Noticias y Calendario", "description": "Noticias de anime y calendario de emisión semanal con horarios por día, tendencias y próximos estrenos, directo en Kino.", "categories": ["anime"], "version": "0.1.6", "icon": "https://raw.githubusercontent.com/Susejing/kino-anifeed/HEAD/icon.png", "popularity": 0, "updatedAt": 1792269565000}, {"address": "gpibarra/events-from-alangulotv", "id": "events-from-alangulotv", "name": "Eventos de AlAnguloTV", "description": "Eventos deportivos en vivo de la agenda de alangulotv", "categories": ["live"], "version": "0.8.2", "icon": "https://raw.githubusercontent.com/gpibarra/events-from-alangulotv/HEAD/icon.png", "popularity": 0, "updatedAt": 1792960280000}, {"address": "kinotvapp/kino-plugin-seenr", "id": "seenr", "name": "Seenr", "description": "Marca en tu cuenta de Seenr lo que empiezas y terminas de ver en Kino. Necesita tu enlace personal de Seenr.", "categories": ["utilities"], "version": "1.0.4", "author": "kinotvapp", "icon": "https://raw.githubusercontent.com/kinotvapp/kino-plugin-seenr/HEAD/icon.png", "popularity": 0, "updatedAt": 1791222168000}, {"address": "cobrolegalgca-droid/nickelodeon-pluto", "id": "nickelodeon-pluto", "name": "Pluto TV: Nick y Reality", "description": "Series de Nickelodeon y realities gratis, en español", "categories": ["movies", "series"], "version": "2.0.0", "author": "cobrolegalgca-droid", "icon": "https://raw.githubusercontent.com/cobrolegalgca-droid/nickelodeon-pluto/HEAD/icon.png", "popularity": 0, "updatedAt": 1792344748000}, {"address": "xuper-plugin/kino-plugin-palaciohd", "id": "palaciohd", "name": "Palacio HD", "description": "Puente a un servidor HD (protocolo de Stremio): películas y series con los títulos de TMDB, y TV en vivo. El servidor mantiene las fuentes.", "categories": ["movies", "series", "live"], "version": "1.0.0", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-palaciohd/HEAD/icon.png", "popularity": 0, "updatedAt": 1792688698000}, {"address": "xuper-plugin/kino-plugin-animes-es", "id": "animes-es", "name": "AnimES", "description": "Anime en español, doblado o subtitulado, desde AnimeAV1, Henaojara, TioAnime y JKAnime. Catálogo y enlaces del addon AnimES de Pigamer37.", "categories": ["anime", "series"], "version": "1.4.2", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-animes-es/HEAD/icon.png", "popularity": 0, "updatedAt": 1791839128000}, {"address": "protaxiogenao-oss/Kino-plug-jkani", "id": "jkanime", "name": "JKAnime", "description": "Hecho por Hotaru Yume - Anime sub español", "categories": ["anime", "series", "movies"], "version": "1.4.2", "author": "Hotaru Yume", "icon": "https://raw.githubusercontent.com/protaxiogenao-oss/Kino-plug-jkani/HEAD/icon.png", "popularity": 0, "updatedAt": 1793125005000}, {"address": "stanpx/tdbn-play", "id": "tdbn-play", "name": "TDBN Play", "description": "Todo en un solo lugar. Películas, series, anime y TV en vivo independiente.", "categories": ["movies", "series", "anime", "live"], "version": "0.1.2", "author": "stanpx", "icon": "https://raw.githubusercontent.com/stanpx/tdbn-play/HEAD/tdbn-icon.png", "popularity": 0, "updatedAt": 1793063969000, "signed": true, "authorKey": "1620221bcf6bfae0382c71590238dbfb173d2ea1088b1ca83a7762f6dab17f49"}, {"address": "xuper-plugin/kino-plugin-hentaimama", "id": "hentaimama", "name": "HentaiMama", "description": "Hentai 18+ en HD con subtítulos en inglés, desde HentaiMama. Solo se muestra con el código 18+ desbloqueado.", "categories": ["adult"], "version": "1.1.5", "author": "xuper-plugin", "popularity": 0, "updatedAt": 1791847904000}, {"address": "protaxiogenao-oss/Kino-plug-popcore", "id": "porcore", "name": "Porcore", "description": "Hecho por Hotaru Yume videos 3D, hentai y cartoon porn de porcore.com. Hecho por Hotaru Yume. Contenido adulto.", "categories": ["adult", "anime"], "version": "1.2.1", "author": "Hotaru Yume", "icon": "https://raw.githubusercontent.com/protaxiogenao-oss/Kino-plug-popcore/HEAD/icon.png", "popularity": 0, "updatedAt": 1793283744000}, {"address": "JuanDEVYT/JuanEmbeds_plugin", "id": "juan-embeds", "name": "Juan Embeds", "description": "Reproduce el stream de los reproductores incrustados (embeds) cuyos enlaces agregues en Ajustes, cada uno con su nombre.", "categories": ["movies", "live"], "version": "0.4.1", "author": "JuanDEVYT", "icon": "https://raw.githubusercontent.com/JuanDEVYT/JuanEmbeds_plugin/HEAD/icono.png", "popularity": 0, "updatedAt": 1791322467000}, {"address": "xuper-plugin/kino-plugin-premium-tv", "id": "premium-tv", "name": "Premium TV", "description": "Canales de TV en vivo desde listas M3U, agrupados por categorías: trae una lista pública lista para usar y acepta las tuyas, con guía de programación opcional.", "categories": ["live"], "version": "0.1.0", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-premium-tv/HEAD/icon.png", "popularity": 0, "updatedAt": 1792989303000}, {"address": "xuper-plugin/kino-plugin-sololatino", "id": "sololatino", "name": "SoloLatino", "description": "Películas, series, anime y doramas en español latino de sololatino.net: sección propia, géneros, plataformas, búsqueda y varios servidores por título.", "categories": ["movies", "series"], "version": "0.1.5", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-sololatino/HEAD/icon.png", "popularity": 0, "updatedAt": 1792721889000}, {"address": "xuper-plugin/kino-plugin-mundodonghua", "id": "mundodonghua", "name": "MundoDonghua", "description": "Donghua (animación china) en español de mundodonghua.com: sección propia, 32 géneros, nuevos episodios, series y películas, en latino, castellano o subtitulado.", "categories": ["series", "movies"], "version": "0.1.5", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-mundodonghua/HEAD/icon.png", "popularity": 0, "updatedAt": 1792720165000}, {"address": "cuentademo051092/kino-plugin-podcast", "id": "podcasts-latam", "name": "Podcasts en español", "description": "Podcasts gratis en español, sobre todo de Latinoamérica y también de España: noticias, historia y misterio, comedia, tecnología y ciencia. Busca cualquier podcast y escucha o descarga sus episodios.", "categories": ["movies", "series"], "version": "0.2.2", "icon": "https://raw.githubusercontent.com/cuentademo051092/kino-plugin-podcast/HEAD/icon.png", "popularity": 0, "updatedAt": 1792344199000}, {"address": "xuper-plugin/kino-plugin-latino", "id": "latino", "name": "Latino", "description": "Películas y series en español latino, castellano o subtituladas desde varias fuentes, y una lista de canales de eventos deportivos en vivo", "categories": ["movies", "series"], "version": "2.2.1", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-latino/HEAD/icon.png", "popularity": 0, "updatedAt": 1792985645000}, {"address": "baskettv23/Gente-clic", "id": "genteclic", "name": "Gente Clic", "description": "Películas de Genteclic, en español", "categories": ["movies"], "version": "1.0.1", "author": "baskettv23", "icon": "https://raw.githubusercontent.com/baskettv23/Gente-clic/HEAD/icon.png", "popularity": 0, "updatedAt": 1792127014000}, {"address": "protaxiogenao-oss/kino-plugin-HeemfntaiLA-main", "id": "hentaila", "name": "HentaiLa", "description": "Hecho por Hotaru Yume Series y episodios hentai en español de hentaila.com: catálogo con Populares, Destacados y estrenos, géneros, búsqueda y varios servidores por episodio. Solo +18. Hecho por Hotaru Yume.", "categories": ["anime", "adult"], "version": "1.1.4", "author": "Hotaru Yume", "icon": "https://raw.githubusercontent.com/protaxiogenao-oss/kino-plugin-HeemfntaiLA-main/HEAD/icon.png", "popularity": 0, "updatedAt": 1793284294000}, {"address": "Susejing/kino-anitrack", "id": "anitrack", "name": "AniTrack — AniList y MAL", "description": "Actualiza tu progreso de anime en AniList y MyAnimeList cada vez que terminas un episodio o una película, sin importar desde qué fuente lo reproduzcas en Kino.", "categories": ["utilities"], "version": "0.3.6", "icon": "https://raw.githubusercontent.com/Susejing/kino-anitrack/HEAD/icon.png", "popularity": 0, "updatedAt": 1792269220000}, {"address": "Susejing/kino-flixtrack", "id": "flixtrack", "name": "FlixTrack — Trakt y SIMKL", "description": "Registra las películas y episodios que terminas de ver en Kino directamente en tu historial de Trakt y SIMKL, sin importar la fuente. Conexión con un código corto desde el teléfono: nada de tokens kilométricos.", "categories": ["utilities"], "version": "0.1.1", "icon": "https://raw.githubusercontent.com/Susejing/kino-flixtrack/HEAD/icon.png", "popularity": 0, "updatedAt": 1792269347000}, {"address": "xuper-plugin/kino-plugin-redtube", "id": "redtube", "name": "RedTube", "description": "+18. Videos para adultos de RedTube: novedades, más vistos, mejor valorados, categorías, búsqueda y reproducción.", "categories": ["adult"], "version": "1.1.1", "author": "xuper-plugin", "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-redtube/HEAD/icon.png", "popularity": 0, "updatedAt": 1793122010000}, {"address": "kinotvapp/kino-plugin-sync-gram", "id": "sync-gram", "name": "Sync-Gram", "description": "Sincroniza tus aparatos de Kino a través de un bot de Telegram que creas tú; la copia queda fijada en tu chat con el bot. No oficial: sin relación con Telegram. (Unofficial: not affiliated with Telegram.)", "categories": [], "version": "1.1.1", "author": "Kino", "icon": "https://raw.githubusercontent.com/kinotvapp/kino-plugin-sync-gram/HEAD/icon.png", "popularity": 0, "updatedAt": 1793205000000, "signed": true, "authorKey": "82b87b938e0a95b142467c815a8823cb54310a13a828c3c4c77b1eda43294ae6"}, {"address": "protaxiogenao-oss/Kino-plugin-Eper", "id": "eporner", "name": "Eporner", "description": "Hecho por Hotaru Yume. Eporner HD: recientes, rankings, Asian, JAV, Cosplay y más. Thumbs 16:9, MP4 multi-calidad, búsqueda precisa.", "categories": ["adult", "movies"], "version": "1.2.2", "author": "Hotaru Yume", "icon": "https://raw.githubusercontent.com/protaxiogenao-oss/Kino-plugin-Eper/HEAD/icon.png", "popularity": 0, "updatedAt": 1793251589000}, {"address": "xuper-plugin/mubis-x", "id": "mubis-x-hd", "name": "Mubis X HD", "description": "Contenido para adultos en HD: películas y canales en vivo, protegidos con el código 18+ de Kino.", "categories": ["adult"], "version": "0.2.0", "author": "kinotvapp", "icon": "https://raw.githubusercontent.com/xuper-plugin/mubis-x/HEAD/icon.png", "popularity": 0, "updatedAt": 1792262772000}, {"address": "kinotvapp/kino-plugin-video-gram", "id": "video-gram", "name": "Video-Gram", "description": "Tus videos de Telegram en Kino: los de tus canales y chats, con tu propio bot o tu cuenta (solo lectura). No oficial: sin relación con Telegram. (Your Telegram videos in Kino, with your own bot or your account, read only. Unofficial: not affiliated with Telegram.)", "categories": ["movies"], "version": "1.2.1", "author": "kinotvapp", "popularity": 0, "updatedAt": 1793220188000, "signed": true, "authorKey": "82b87b938e0a95b142467c815a8823cb54310a13a828c3c4c77b1eda43294ae6"}, {"address": "kinotvapp/kino-plugin-subtitlecat", "id": "subtitlecat", "name": "SubtitleCat", "description": "Subtítulos de SubtitleCat en español y muchos otros idiomas, para cualquier película o serie que veas en Kino.", "categories": [], "version": "1.0.1", "author": "kinotvapp", "icon": "https://raw.githubusercontent.com/kinotvapp/kino-plugin-subtitlecat/HEAD/icon.png", "popularity": 0, "updatedAt": 1791219558000}, {"address": "protaxiogenao-oss/Kino-pl-123", "id": "123av", "name": "123AV", "description": "Hecho por Hotaru Yume. 123av.com con HLS. Solo +18.", "categories": ["adult"], "version": "1.3.1", "author": "Hotaru Yume", "icon": "https://raw.githubusercontent.com/protaxiogenao-oss/Kino-pl-123/HEAD/icon.png", "popularity": 0, "updatedAt": 1793251064000}, {"address": "protaxiogenao-oss/Kino-plug-Tubepclassq", "id": "tubepornclassic", "name": "TubePornClassic", "description": "Hecho por Hotaru Yume. Videos clásicos de tubepornclassic.com. Solo +18.", "categories": ["adult"], "version": "1.0.2", "author": "Hotaru Yume", "icon": "https://raw.githubusercontent.com/protaxiogenao-oss/Kino-plug-Tubepclassq/HEAD/icon.png", "popularity": 0, "updatedAt": 1793250842000}, {"address": "protaxiogenao-oss/kino-plugin-Xvpos", "id": "xvideos", "name": "XVideos", "description": "Hecho por Hotaru Yume. Videos adultos de xvideos.com. Solo +18.", "categories": ["adult"], "version": "1.6.1", "author": "Hotaru Yume", "icon": "https://raw.githubusercontent.com/protaxiogenao-oss/kino-plugin-Xvpos/HEAD/icon.png", "popularity": 0, "updatedAt": 1793250571000}, {"address": "protaxiogenao-oss/Kino-plug-Rul34", "id": "rule34video", "name": "Rule34Video", "description": "Hecho por Hotaru Yume. Videos de rule34video.com: lo nuevo, populares, VAM, 3D Nsfw, SFM, MMD, videojuegos y anime 3D. Calidad configurable.", "categories": ["adult"], "version": "1.6.3", "author": "Hotaru Yume", "icon": "https://raw.githubusercontent.com/protaxiogenao-oss/Kino-plug-Rul34/HEAD/icon.png", "popularity": 0, "updatedAt": 1793248832000}, {"address": "protaxiogenao-oss/kino-plugin-flixlam", "id": "flixlatam", "name": "FlixLatam", "description": "Hecho por Hotaru Yume. FlixLatam: series, películas y anime en latino", "categories": ["movies", "series", "anime"], "version": "1.2.0", "author": "Hotaru Yume", "icon": "https://raw.githubusercontent.com/protaxiogenao-oss/kino-plugin-flixlam/HEAD/icon.png", "popularity": 0, "updatedAt": 1793288128000}, {"address": "kinotvapp/kino-social", "id": "kino-social", "name": "Kino Social", "description": "Experimento: un feed para contar lo que ves, con comentarios, perfiles y personas a las que seguir", "categories": ["utilities"], "version": "0.4.2", "author": "kinotvapp", "icon": "https://raw.githubusercontent.com/kinotvapp/kino-social/HEAD/icon.png", "popularity": 0, "updatedAt": 1793310243692, "signed": true, "authorKey": "82b87b938e0a95b142467c815a8823cb54310a13a828c3c4c77b1eda43294ae6"}];
+
+    const STREMIO_NAMES = {
+      "opensubtitles-v3": "OpenSubtitles v3",
+      "subtis": "Subtis - Español",
+      "subsense": "SubSense",
+      "subtitles-website": "Subtitle Search Engine",
+      "cinemeta": "Cinemeta (Catálogo Oficial)",
+      "streaming-catalogs": "Streaming Catalogs (Netflix, Max, Disney+, Prime)",
+      "imdb-catalogs": "IMDb Catalogs",
+      "seenr": "Seenr Tendencias",
+      "stremboxd": "Stremboxd (Letterboxd)",
+      "rotten-tomatoes": "Rotten Tomatoes",
+      "film-festivals": "Film Festivals",
+      "mubi": "MUBI Catalog",
+      "cinema-time-machine": "Cinema Time Machine",
+      "marvel": "Marvel Universe",
+      "star-wars": "Star Wars Universe",
+      "dc-universe": "DC Universe",
+      "james-bond": "James Bond 007",
+      "anime-kitsu": "Anime Kitsu",
+      "anime-catalogs": "Anime Catalogs (MAL / AniList)",
+      "animes-season": "Animes de la Temporada",
+      "dragonball-es": "Dragon Ball Español - Cronología",
+      "pluto-tv": "Pluto TV (Canales en Vivo)",
+      "radios": "SHOUTcast Radios (90.000+)"
+    };
+
+    function loadStore(key, fallback) {
+      try {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      } catch (e) { return fallback; }
+    }
+    function saveStore(key, val) {
+      try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
+    }
+
+    // Normalizar todos los plugins de "De Kino" y "De la comunidad"
+    function buildUnifiedStore(seedList, commList) {
+      const byId = new Map();
+      seedList.forEach(p => {
+        const isStremio = typeof p.stremio === "string";
+        const entry = {
+          id: p.id,
+          name: p.name || STREMIO_NAMES[p.id] || p.id,
+          description: p.description || "",
+          address: p.repo || null,
+          stremio: p.stremio || null,
+          categories: p.categories || ["movies", "series"],
+          tags: p.tags || [],
+          recommended: true,
+          needsSetup: !!p.needsSetup,
+          requires: p.requires || [],
+          icon: p.repo ? `https://raw.githubusercontent.com/${p.repo}/HEAD/icon.png` : "https://avatars.githubusercontent.com/u/332969319?s=120&v=4",
+          author: p.repo ? p.repo.split("/")[0] : "Stremio Addon"
+        };
+        byId.set(entry.id, entry);
+      });
+
+      commList.forEach(c => {
+        const existing = byId.get(c.id);
+        const merged = {
+          id: c.id,
+          name: c.name || (existing && existing.name) || c.id,
+          description: c.description || (existing && existing.description) || "",
+          address: c.address || (existing && existing.address) || null,
+          stremio: (existing && existing.stremio) || null,
+          categories: c.categories || (existing && existing.categories) || ["movies"],
+          tags: (existing && existing.tags) || [],
+          recommended: existing ? true : false,
+          version: c.version || "1.0",
+          author: c.author || (c.address ? c.address.split("/")[0] : "Comunidad"),
+          icon: c.icon || (c.address ? `https://raw.githubusercontent.com/${c.address}/HEAD/icon.png` : ""),
+          popularity: c.popularity || 0
+        };
+        byId.set(merged.id, merged);
+      });
+      return Array.from(byId.values());
+    }
+
+    // Plugins preinstalados por defecto para que el Home tenga contenido rico desde el primer segundo
+    const DEFAULT_INSTALLED = [
+      {
+        id: "internet-archive",
+        name: "Internet Archive",
+        address: "kinotvapp/kino-plugin-archive",
+        stremio: null,
+        enabled: true
+      },
+      {
+        id: "cinemeta",
+        name: "Cinemeta (Catálogo Oficial)",
+        address: null,
+        stremio: "https://v3-cinemeta.strem.io/manifest.json",
+        enabled: true
+      },
+      {
+        id: "yoja-tv-kino",
+        name: "YojaTV-alpha",
+        address: "YojaTV-kino/YojaTV_plugin",
+        stremio: null,
+        enabled: true
+      },
+      {
+        id: "cinehax-plus",
+        name: "CineHax+",
+        address: "JuanDEVYT/cinehax-plus",
+        stremio: null,
+        enabled: true
+      },
+      {
+        id: "tv-latam-lista",
+        name: "TV Latam",
+        address: "JuanDEVYT/kino-plugin-tvlatam",
+        stremio: null,
+        enabled: true
+      },
+      {
+        id: "cinehdplus",
+        name: "CineHD Plus",
+        address: "xuper-plugin/kino-plugin-cinehdplus",
+        stremio: null,
+        enabled: true
+      }
+    ];
+
+    const state = {
+      view: "home",
+      storeTab: "community", // "official" | "community" | "installed" | "manual"
+      storeCategory: "all",
+      storeQuery: "",
+      showAdult: loadStore("kino_show_adult", false),
+      corsMode: loadStore("kino_cors_mode", "auto"), // "auto" | "direct" | "allorigins" | "corsproxy"
+      customProxy: loadStore("kino_custom_proxy", ""),
+      lastGoodProxy: loadStore("kino_last_proxy", ""),
+      deadProxies: {}, // solo en memoria: prefix -> timestamp del último fallo
+      searchRun: 0,
+      diagLog: [], // registro visible en la vista Diagnóstico (sin necesidad de F12)
+      tmdbKey: loadStore("kino_tmdb_key", ""),
+      storeEntries: buildUnifiedStore(KINO_SEED_PLUGINS, KINO_COMMUNITY_STORE),
+      installed: loadStore("kino_installed_v2", DEFAULT_INSTALLED),
+      pluginConfigs: loadStore("kino_plugin_configs", {}),
+      loadedModules: {}, // id -> { manifest, exports }
+      homeRows: [],
+      liveChannels: loadStore("kino_m3u_v2", [
+        { name: "DW Español (En Vivo)", url: "https://dwamdstream104.akamaized.net/hls/live/2015530/dwstream104/index.m3u8", group: "Noticias" }
+      ]),
+      favorites: loadStore("kino_favs_v2", []),
+      selectedItem: null,
+      configuringPlugin: null,
+      activeVideoUrl: "",
+      hlsInstance: null,
+      // Vía "sin proxy": catálogo Cinemeta + servidores embed en iframe
+      activeSources: [],
+      currentSourceIndex: 0,
+      selectedSeason: 1,
+      selectedEpisode: 1
+    };
+
+    const viewContent = document.getElementById("viewContent");
+    const viewTitle = document.getElementById("viewTitle");
+    const statusPill = document.getElementById("statusPill");
+    const installedCountBadge = document.getElementById("installedCountBadge");
+
+    const BUILD_TAG = "r7-2026-11-03";
+    window.__kinoState = state; // gancho de depuración (inofensivo)
+
+    let statusLockUntil = 0;
+    function setStatus(msg, opts) {
+      // Un mensaje prioritario (p. ej. "copiado") se mantiene 3 s aunque una
+      // tarea de fondo quiera sobrescribir la barra en ese momento.
+      if (opts && opts.priority) statusLockUntil = Date.now() + 3000;
+      else if (Date.now() < statusLockUntil) return;
+      statusPill.textContent = msg;
+    }
+
+    // Registro de diagnóstico visible en la TV (la app corre sin consola F12)
+    function diagLog(kind, msg) {
+      const d = new Date();
+      const hh = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") + ":" + String(d.getSeconds()).padStart(2, "0");
+      state.diagLog.push({ t: hh, kind: kind || "info", msg: String(msg) });
+      if (state.diagLog.length > 400) state.diagLog.splice(0, state.diagLog.length - 400);
+      const box = document.getElementById("diagLogBox");
+      if (box && state.view === "diag") {
+        const line = document.createElement("div");
+        line.textContent = `${hh} [${kind || "info"}] ${msg}`;
+        box.appendChild(line);
+        while (box.children.length > 400) box.removeChild(box.firstChild);
+        box.scrollTop = box.scrollHeight;
+      }
+    }
+    function updateBadges() {
+      installedCountBadge.textContent = String(state.installed.length);
+    }
+
+    // Copia texto al portapapeles con doble vía: API moderna y, si no existe
+    // (WebViews de TV antiguos), un <textarea> temporal + execCommand.
+    async function copyTextToClipboard(txt, okMsg) {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(txt);
+          setStatus(okMsg || "Copiado", { priority: true });
+          return true;
+        }
+      } catch (_) { /* seguir con el plan B */ }
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = txt;
+        ta.setAttribute("readonly", "");
+        ta.style.cssText = "position:fixed; top:0; left:0; width:2px; height:2px; opacity:0.01; z-index:9999;";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        const ok = document.execCommand && document.execCommand("copy");
+        document.body.removeChild(ta);
+        if (ok) { setStatus(okMsg || "Copiado", { priority: true }); return true; }
+      } catch (_) { /* sin portapapeles en este aparato */ }
+      setStatus("✗ Este aparato no permite copiar: haz una foto de la pantalla", { priority: true });
+      return false;
+    }
+
+    // =========================================================================
+    // 2. PUENTE DE RED Y RUNTIME `window.kino` PARA EJECUTAR PLUGINS DE GITHUB
+    // =========================================================================
+    const DIRECT_CORS_HOSTS = [
+      "raw.githubusercontent.com",
+      "api.github.com",
+      "cdn.jsdelivr.net",
+      "archive.org",
+      "strem.io",
+      "baby-beamup.club",
+      "elfhosted.com",
+      "strem.fun",
+      "onrender.com",
+      "vercel.app",
+      "fly.dev",
+      "themoviedb.org",
+      "anilist.co"
+    ];
+
+    function isLikelyCorsFriendly(url) {
+      try {
+        const h = new URL(url).hostname.toLowerCase();
+        return DIRECT_CORS_HOSTS.some(d => h === d || h.endsWith("." + d));
+      } catch (e) { return false; }
+    }
+
+    // Lee el cuerpo con un tope de bytes: evita descargar un video completo cuando
+    // un plugin solo "prueba" si la dirección responde (kino.fetch probe).
+    async function readBodyCapped(res, capBytes = 4 * 1024 * 1024) {
+      try {
+        if (res.body && typeof res.body.getReader === "function") {
+          const reader = res.body.getReader();
+          const chunks = [];
+          let total = 0;
+          while (total < capBytes) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            total += value.length;
+            if (total >= capBytes) { try { await reader.cancel(); } catch (_) {} break; }
+          }
+          const merged = new Uint8Array(Math.min(total, capBytes));
+          let off = 0;
+          for (const c of chunks) { merged.set(c.subarray(0, merged.length - off), off); off += Math.min(c.length, merged.length - off); if (off >= merged.length) break; }
+          return new TextDecoder("utf-8").decode(merged);
+        }
+        return await res.text();
+      } catch (_) {
+        try { return await res.text(); } catch (_) { return ""; }
+      }
+    }
+
+    // fetch con timeout compatible con WebViews antiguos de VIDAA (sin AbortSignal.timeout)
+    function fetchWithTimeout(url, fetchOpts, ms) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, Math.max(1500, ms || 20000));
+      return fetch(url, Object.assign({}, fetchOpts, { signal: ctrl.signal }))
+        .finally(() => clearTimeout(timer));
+    }
+
+    // Límite de tiempo para cualquier promesa de plugin: ningún plugin puede congelar la app
+    function withTimeout(promise, ms, label) {
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`Tiempo agotado (${Math.round(ms / 1000)}s) en ${label || "plugin"}`)), ms))
+      ]);
+    }
+
+    // Detecta retos de Cloudflare o errores del propio proxy disfrazados de respuesta
+    function looksBlocked(result) {
+      if (!result) return true;
+      const t = (result.text || "").slice(0, 6000);
+      if (/Attention Required!\s*\|\s*Cloudflare|Just a moment\.\.\.|cf-chl|challenge-platform|Checking your browser|Enable JavaScript and cookies to continue/i.test(t)) return true;
+      if (result.status === 401 && /api key|API key|valid API key/i.test(t)) return true; // corsproxy.io ahora exige llave
+      if (result.status === 429 && t.length < 3000) return true; // proxy saturado
+      if (result.status >= 500 && t.length < 3000) return true; // proxy caído (522, etc.)
+      return false;
+    }
+
+    // URLs de video/audio directo (para la sonda no-cors y la reproducción)
+    function isMediaUrl(url) {
+      return /\.(mp4|m3u8|ts|mkv|avi|webm|mov|m4v|mpd|mp3|aac)(\?|#|$)/i.test(String(url || ""));
+    }
+
+    // Sonda directa sin CORS para URLs de video: el navegador no puede LEER la
+    // respuesta, pero sí saber que el servidor contesta (respuesta "opaca").
+    // Es lo que el plugin necesita en su paso `playable()`: sin esto, la sonda se
+    // ahogaba en los proxies y el plugin descartaba servidores que sí funcionaban.
+    async function probeMediaNoCors(url, ms) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, Math.min(ms || 8000, 10000));
+      try {
+        await fetch(url, { method: "GET", mode: "no-cors", signal: ctrl.signal });
+        clearTimeout(timer);
+        try { ctrl.abort(); } catch (_) {} // corta la descarga del cuerpo: solo importaba la respuesta
+        return { ok: true, status: 200, url: url, text: "", headers: {}, opaque: true };
+      } catch (e) {
+        clearTimeout(timer);
+        throw e;
+      }
+    }
+
+    async function smartFetch(url, options = {}) {
+      const method = (options.method || "GET").toUpperCase();
+      const headers = options.headers || {};
+      const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 20000;
+      let body = undefined;
+      if (options.body) {
+        if (typeof options.body === "string") body = options.body;
+        else if (options.body.json !== undefined) {
+          body = JSON.stringify(options.body.json);
+          headers["Content-Type"] = headers["Content-Type"] || "application/json";
+        } else if (options.body.form) {
+          // Como OkHttp FormBody: espacios como %20, no "+"
+          body = Object.keys(options.body.form)
+            .map(k => encodeURIComponent(k) + "=" + encodeURIComponent(String(options.body.form[k])))
+            .join("&");
+          headers["Content-Type"] = headers["Content-Type"] || "application/x-www-form-urlencoded";
+        }
+      }
+
+      // Filtrar cabeceras prohibidas por el navegador (User-Agent, Referer, Host, Cookie)
+      const safeHeaders = {};
+      Object.entries(headers).forEach(([k, v]) => {
+        const low = k.toLowerCase();
+        if (!["user-agent", "referer", "origin", "host", "cookie", "sec-fetch-mode"].includes(low)) {
+          safeHeaders[k] = String(v);
+        }
+      });
+
+      const shortUrl = (() => { try { const u = new URL(url); return (u.host + u.pathname).slice(0, 70); } catch (_) { return url.slice(0, 70); } })();
+
+      const tryDirect = async () => {
+        const t0 = Date.now();
+        try {
+          const res = await fetchWithTimeout(url, { method, headers: safeHeaders, body }, timeoutMs);
+          const txt = await readBodyCapped(res);
+          diagLog("red", `${method} ${shortUrl} → directo → HTTP ${res.status} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+          return { ok: res.ok, status: res.status, url: res.url || url, text: txt, headers: {} };
+        } catch (e) {
+          diagLog("red", `${method} ${shortUrl} → directo → falla CORS/red (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+          throw e;
+        }
+      };
+
+      const tryProxy = async (proxyPrefix) => {
+        const proxyName = (() => { try { return new URL(proxyPrefix).host; } catch (_) { return proxyPrefix.slice(0, 30); } })();
+        const t0 = Date.now();
+        try {
+          const target = proxyPrefix + encodeURIComponent(url);
+          const res = await fetchWithTimeout(target, { method, headers: safeHeaders, body }, Math.min(timeoutMs, 15000));
+          const txt = await readBodyCapped(res);
+          diagLog("red", `${method} ${shortUrl} → proxy ${proxyName} → HTTP ${res.status} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+          return { ok: res.ok, status: res.status, url: url, text: txt, headers: {}, via: proxyPrefix };
+        } catch (e) {
+          diagLog("red", `${method} ${shortUrl} → proxy ${proxyName} → sin respuesta (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+          throw e;
+        }
+      };
+
+      // Cadena de proxies pública actualizada (corsproxy.io ya exige llave de pago y se eliminó)
+      const proxies = [];
+      if (state.customProxy) proxies.push(state.customProxy);
+      if (state.lastGoodProxy && !proxies.includes(state.lastGoodProxy)) proxies.push(state.lastGoodProxy);
+      ["https://api.codetabs.com/v1/proxy?quest=",
+       "https://api.allorigins.win/raw?url=",
+       "https://api.cors.lol/?url="].forEach(p => { if (!proxies.includes(p)) proxies.push(p); });
+
+      if (state.corsMode === "direct" || isLikelyCorsFriendly(url)) {
+        try {
+          const d = await tryDirect();
+          if (state.corsMode === "direct" || !looksBlocked(d)) return d;
+        } catch (err) {
+          if (state.corsMode === "direct") throw err;
+        }
+      }
+
+      if (state.corsMode === "auto") {
+        try {
+          const d = await tryDirect();
+          if (!looksBlocked(d)) return d;
+        } catch (_) {}
+        // Sonda no-cors para video: evita que los proxies se ahoguen con archivos
+        // pesados y confirma al plugin que el CDN del video sí responde.
+        if (!body && isMediaUrl(url)) {
+          try {
+            const p = await probeMediaNoCors(url, timeoutMs);
+            diagLog("red", `SONDA ${shortUrl} → no-cors → CDN alcanzable ✓`);
+            return p;
+          } catch (_) {
+            diagLog("red", `SONDA ${shortUrl} → no-cors → sin respuesta`);
+          }
+        }
+      }
+
+      let firstUsable = null;
+      let lastAny = null;
+      // Si TODOS los proxies están marcados como caídos, se reintenta con todos igualmente:
+      // la marca es una pista, no una condena (una sola URL que falle no debe vetar el proxy).
+      const anyAlive = proxies.some(p => Date.now() - (state.deadProxies[p] || 0) >= 10 * 60 * 1000);
+      for (const p of proxies) {
+        // Proxy marcado como caído hace menos de 10 min: se salta para no pagar su timeout en cada petición
+        const deadAt = state.deadProxies[p] || 0;
+        if (anyAlive && Date.now() - deadAt < 10 * 60 * 1000) continue;
+        try {
+          const r = await tryProxy(p);
+          if (!r || r.status <= 0) { state.deadProxies[p] = Date.now(); continue; }
+          lastAny = r;
+          if (r.ok && !looksBlocked(r)) {
+            // Recuerda el proxy que sí funcionó para intentarlo primero la próxima vez
+            if (state.lastGoodProxy !== p) {
+              state.lastGoodProxy = p;
+              saveStore("kino_last_proxy", p);
+            }
+            return r;
+          }
+          if (looksBlocked(r)) diagLog("red", `   ↳ respuesta inutilizable (reto Cloudflare o proxy saturado)`);
+          if (!looksBlocked(r) && !firstUsable) firstUsable = r;
+        } catch (_) {
+          state.deadProxies[p] = Date.now(); // sin respuesta o timeout: no insistir por un rato
+        }
+      }
+      if (firstUsable) return firstUsable;
+      if (lastAny) return lastAny; // conserva la semántica de error del sitio para el plugin
+      return await tryDirect();
+    }
+
+    // Selector HTML compatible con Jsoup / kino.html.select de Kino APK
+    function kinoHtmlSelect(htmlStr, cssSelector) {
+      try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(String(htmlStr || ""), "text/html");
+        const nodes = Array.from(doc.querySelectorAll(String(cssSelector || "*")));
+        return nodes.map(el => {
+          const attrs = {};
+          for (let i = 0; i < el.attributes.length; i++) {
+            const a = el.attributes[i];
+            attrs[a.name] = a.value;
+          }
+          let ownText = "";
+          el.childNodes.forEach(n => { if (n.nodeType === 3) ownText += n.textContent; });
+          return {
+            tag: el.tagName.toLowerCase(),
+            tagName: el.tagName.toLowerCase(),
+            text: (el.textContent || "").trim(),
+            ownText: ownText.trim(),
+            html: el.innerHTML || "",
+            innerHtml: el.innerHTML || "",
+            outerHtml: el.outerHTML || "",
+            attrs: attrs,
+            attr: function(k) { return attrs[k] !== undefined ? attrs[k] : null; }
+          };
+        });
+      } catch (e) {
+        return [];
+      }
+    }
+
+    // Algoritmo oficial kino.rank de prelude.js
+    function foldAccents(text) {
+      return String(text || "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+    }
+    function titleTokens(text) {
+      const plain = foldAccents(String(text || "").toLowerCase());
+      return new Set((plain.match(/[a-z0-9]+/g) || []).filter(w => w.length > 2));
+    }
+    function sharedCount(a, b) {
+      let n = 0;
+      a.forEach(t => { if (b.has(t)) n++; });
+      return n;
+    }
+    const kinoRank = {
+      shortQuery: function(query) {
+        const text = String(query || "").trim();
+        const head = text.split(/[:,|–—]/)[0].trim();
+        return head.length >= 3 ? head : text;
+      },
+      sortBySimilarity: function(items, query, getTitle) {
+        if (!Array.isArray(items)) return [];
+        const of = getTitle || (it => it && it.title);
+        const qTokens = titleTokens(Array.isArray(query) ? query.join(" ") : query);
+        if (!qTokens.size) return items;
+        return items
+          .map((item, index) => {
+            const t = of(item);
+            const iTokens = titleTokens(Array.isArray(t) ? t.join(" ") : t);
+            return { item, index, score: sharedCount(qTokens, iTokens) };
+          })
+          .sort((a, b) => b.score - a.score || a.index - b.index)
+          .map(x => x.item);
+      },
+      filterRelevant: function(items, query, getTitle) {
+        if (!Array.isArray(items)) return [];
+        return items;
+      }
+    };
+
+    // Construye el entorno `window.kino` activo para un plugin específico
+    function createKinoEnv(pluginId) {
+      return {
+        apiVersion: 15,
+        appVersion: "0.9.79",
+        lang: "es",
+        fetchAnyHost: true,
+        device: "tv",
+        screen: { widgets: [], names: [], version: 1 },
+        fetch: async function(url, opts = {}) {
+          const r = await smartFetch(url, opts);
+          return {
+            ok: r.ok,
+            status: r.status,
+            url: r.url,
+            headers: r.headers || {},
+            truncated: false,
+            text: function() { return r.text; },
+            json: function() { return JSON.parse(r.text); },
+            base64: function() { return btoa(unescape(encodeURIComponent(r.text))); }
+          };
+        },
+        html: {
+          select: kinoHtmlSelect
+        },
+        rank: kinoRank,
+        storage: {
+          get: function(k) { return loadStore(`kino_pstore_${pluginId}_${k}`, null); },
+          set: function(k, v) { saveStore(`kino_pstore_${pluginId}_${k}`, String(v)); },
+          remove: function(k) { try { localStorage.removeItem(`kino_pstore_${pluginId}_${k}`); } catch (e) {} },
+          keys: function() {
+            const prefix = `kino_pstore_${pluginId}_`;
+            const out = [];
+            try {
+              for (let i = 0; i < localStorage.length; i++) {
+                const full = localStorage.key(i);
+                if (full && full.startsWith(prefix)) out.push(full.slice(prefix.length));
+              }
+            } catch (e) {}
+            return out;
+          }
+        },
+        // Navegador oculto (kino.browser, apiVersion 6+): aproximación web.
+        // Descarga la página del reproductor y busca enlaces .m3u8/.mp4 en el HTML.
+        // Servidores con ofuscación JS pesada (p. ej. VOE) pueden no resolverse aquí.
+        browser: {
+          capture: async function(pageUrl, capOpts = {}) {
+            try {
+              const r = await smartFetch(String(pageUrl), { timeoutMs: capOpts.timeoutMs || 12000 });
+              if (!r.ok || !r.text) return null;
+              const media = [];
+              const seen = new Set();
+              const push = (u) => {
+                if (!u || seen.has(u)) return;
+                seen.add(u);
+                media.push({
+                  url: u,
+                  mime: /\.mp4(?:[?#]|$)/i.test(u) ? "video/mp4" : "application/vnd.apple.mpegurl",
+                  headers: { Referer: String(pageUrl) }
+                });
+              };
+              const re = /https?:\\?\/\\?\/[^"'<>\s\\]+?\.(?:m3u8|mp4)(?:\?[^"'<>\s\\]*)?/gi;
+              let m;
+              while ((m = re.exec(r.text)) !== null) push(m[0].replace(/\\\//g, "/"));
+              const matchRe = capOpts.match ? new RegExp(capOpts.match, "i") : null;
+              const filtered = matchRe ? media.filter(x => matchRe.test(x.url)) : media;
+              if (!filtered.length) return null;
+              return { url: String(pageUrl), media: filtered };
+            } catch (_) {
+              return null;
+            }
+          }
+        },
+        config: {
+          get: function(k) {
+            const cfg = state.pluginConfigs[pluginId] || {};
+            return cfg[k];
+          },
+          all: function() {
+            return Object.assign({}, state.pluginConfigs[pluginId] || {});
+          }
+        },
+        cookies: {
+          get: function() { return null; },
+          clear: function() {}
+        },
+        crypto: {
+          sha256: function(d) { return String(d); },
+          md5: function(d) { return String(d); }
+        },
+        tmdb: async function(path, params = {}) {
+          if (!state.tmdbKey) return { results: [] };
+          const q = new URLSearchParams(Object.assign({}, params, { api_key: state.tmdbKey }));
+          const r = await smartFetch(`https://api.themoviedb.org/3${path}?${q}`);
+          return JSON.parse(r.text);
+        },
+        sleep: function(ms) { return new Promise(res => setTimeout(res, Math.min(Number(ms) || 0, 5000))); },
+        error: function(code, message, extra) {
+          const err = new Error((extra && extra.userMessage) || message || code);
+          err.code = code;
+          if (extra && typeof extra === "object") Object.assign(err, extra);
+          return err;
+        },
+        log: Object.assign(function(...a) {
+          console.log(`[Plugin ${pluginId}]`, ...a);
+          diagLog(pluginId, a.map(x => typeof x === "object" ? JSON.stringify(x) : String(x)).join(" ").slice(0, 300));
+        }, {
+          report: function(...a) {
+            console.warn(`[Plugin ${pluginId}]`, ...a);
+            diagLog(pluginId, "⚠️ " + a.map(x => typeof x === "object" ? JSON.stringify(x) : String(x)).join(" ").slice(0, 300));
+          }
+        })
+      };
+    }
+
+    // Carga y compila un plugin de GitHub (`kino-plugin.json` + `plugin.js`)
+    async function loadGitHubPlugin(pluginEntry) {
+      const id = pluginEntry.id;
+      if (state.loadedModules[id]) return state.loadedModules[id];
+      const repo = pluginEntry.address;
+      if (!repo) return null;
+
+      const manifestUrls = [
+        `https://raw.githubusercontent.com/${repo}/HEAD/kino-plugin.json`,
+        `https://raw.githubusercontent.com/${repo}/main/kino-plugin.json`,
+        `https://raw.githubusercontent.com/${repo}/master/kino-plugin.json`,
+        `https://cdn.jsdelivr.net/gh/${repo}@main/kino-plugin.json`
+      ];
+      let manifest = null;
+      for (const u of manifestUrls) {
+        try {
+          const r = await smartFetch(u);
+          if (r.ok) { manifest = JSON.parse(r.text); break; }
+        } catch (_) {}
+      }
+      if (!manifest) throw new Error(`No se pudo descargar kino-plugin.json de ${repo}`);
+
+      // Inicializar valores por defecto de configuración del manifiesto
+      if (Array.isArray(manifest.settings)) {
+        state.pluginConfigs[id] = state.pluginConfigs[id] || {};
+        manifest.settings.forEach(s => {
+          if (s && s.key && state.pluginConfigs[id][s.key] === undefined && s.default !== undefined) {
+            state.pluginConfigs[id][s.key] = s.default;
+          }
+        });
+      }
+
+      const entryFile = (manifest.entry || "plugin.js").replace(/^\.\//, "");
+      const codeUrls = [
+        `https://raw.githubusercontent.com/${repo}/HEAD/${entryFile}`,
+        `https://raw.githubusercontent.com/${repo}/main/${entryFile}`,
+        `https://raw.githubusercontent.com/${repo}/master/${entryFile}`,
+        `https://cdn.jsdelivr.net/gh/${repo}@main/${entryFile}`
+      ];
+      let code = null;
+      for (const u of codeUrls) {
+        try {
+          const r = await smartFetch(u);
+          if (r.ok && r.text) { code = r.text; break; }
+        } catch (_) {}
+      }
+      if (!code) throw new Error(`No se pudo descargar ${entryFile} de ${repo}`);
+
+      // Inyectar `globalThis.kino` antes de evaluar el módulo
+      globalThis.kino = createKinoEnv(id);
+      let modExports = null;
+      try {
+        // No inyectar la declaración si el propio plugin ya declara `kino`
+        const declaresKino = /(^|\n)\s*(?:const|let|var)\s+kino\b/.test(code);
+        const wrappedCode = declaresKino ? code : `const kino = globalThis.kino;\n${code}`;
+        const blob = new Blob([wrappedCode], { type: "text/javascript" });
+        const blobUrl = URL.createObjectURL(blob);
+        modExports = await import(blobUrl);
+        URL.revokeObjectURL(blobUrl);
+      } catch (err) {
+        // Fallback transformando `export async function` / `export function` / `export { ... }`
+        let transformed = code
+          .replace(/^\s*import\s[^;]*;?\s*$/gm, "") // quita imports estáticos (no soportados en Function)
+          .replace(/export\s+async\s+function\s+([A-Za-z0-9_]+)/g, "exports.$1 = async function $1")
+          .replace(/export\s+function\s+([A-Za-z0-9_]+)/g, "exports.$1 = function $1")
+          .replace(/export\s+const\s+([A-Za-z0-9_]+)\s*=/g, "exports.$1 =")
+          .replace(/export\s+let\s+([A-Za-z0-9_]+)\s*=/g, "exports.$1 =")
+          .replace(/export\s+var\s+([A-Za-z0-9_]+)\s*=/g, "exports.$1 =")
+          .replace(/export\s*\{([^}]+)\}\s*;?/g, (_, list) => {
+            return list.split(",").map(part => {
+              const tokens = part.trim().split(/\s+as\s+/);
+              const local = tokens[0].trim();
+              const exported = (tokens[1] || tokens[0]).trim();
+              return local ? `exports.${exported} = ${local};` : "";
+            }).join("\n");
+          });
+        const fn = new Function("kino", `const exports = {};\n${transformed}\nreturn exports;`);
+        modExports = fn(createKinoEnv(id));
+      }
+
+      const record = { manifest, exports: modExports, env: createKinoEnv(id) };
+      state.loadedModules[id] = record;
+      return record;
+    }
+
+    async function callPluginFn(pluginEntry, fnName, ...args) {
+      const t0 = Date.now();
+      const rawArg = args.length ? args[0] : null;
+      const argVal = typeof rawArg === "string" ? rawArg : (rawArg && (rawArg.q || rawArg.query));
+      const argHint = argVal ? ` "${String(argVal).slice(0, 40)}"` : "";
+      try {
+        const mod = await loadGitHubPlugin(pluginEntry);
+        if (!mod || !mod.exports || typeof mod.exports[fnName] !== "function") return null;
+        globalThis.kino = mod.env;
+        const res = await mod.exports[fnName](...args);
+        const secs = ((Date.now() - t0) / 1000).toFixed(1);
+        const size = Array.isArray(res) ? res.length + " ítems" : (res && typeof res === "object" ? Object.keys(res).length + " campos" : String(res));
+        diagLog("plugin", `${pluginEntry.id}.${fnName}(${argHint}) → ${size} (${secs}s)`);
+        return res;
+      } catch (e) {
+        const secs = ((Date.now() - t0) / 1000).toFixed(1);
+        diagLog("error", `${pluginEntry.id}.${fnName}(${argHint}) → ERROR ${e && e.code ? e.code + ": " : ""}${e && (e.userMessage || e.message)} (${secs}s)`);
+        throw e;
+      }
+    }
+
+    // =========================================================================
+    // 3. ADAPTADOR DE ADDONS DE STREMIO (Cinemeta, Pluto TV, Dragon Ball, etc.)
+    // =========================================================================
+    async function fetchStremioAddonHome(addonEntry) {
+      const manifestUrl = addonEntry.stremio;
+      if (!manifestUrl) return [];
+      const baseUrl = manifestUrl.replace(/\/manifest\.json$/i, "");
+      const r = await smartFetch(manifestUrl);
+      if (!r.ok) return [];
+      const manifest = JSON.parse(r.text);
+      const catalogs = (manifest.catalogs || []).filter(c => !c.extra || !c.extra.some(e => e.isRequired));
+      const rows = [];
+
+      for (const cat of catalogs.slice(0, 3)) {
+        try {
+          const catUrl = `${baseUrl}/catalog/${encodeURIComponent(cat.type)}/${encodeURIComponent(cat.id)}.json`;
+          const cr = await smartFetch(catUrl);
+          if (!cr.ok) continue;
+          const data = JSON.parse(cr.text);
+          const metas = data.metas || [];
+          if (!metas.length) continue;
+          rows.push({
+            row: `${addonEntry.name} · ${cat.name || cat.type}`,
+            sourceId: addonEntry.id,
+            sourceName: addonEntry.name,
+            items: metas.slice(0, 24).map(m => ({
+              id: `${addonEntry.id}_${m.id}`,
+              rawId: m.id,
+              ref: m.id,
+              title: m.name || m.title || "Sin título",
+              year: m.releaseInfo || m.year || "",
+              poster: m.poster || m.logo || "",
+              backdrop: m.background || "",
+              synopsis: m.description || "",
+              kind: m.type === "series" ? "series" : (m.type === "tv" || m.type === "channel" ? "live" : "movie"),
+              stremioBase: baseUrl,
+              stremioType: m.type || cat.type,
+              pluginId: addonEntry.id,
+              source: addonEntry.name
+            }))
+          });
+        } catch (_) {}
+      }
+      return rows;
+    }
+
+    // =========================================================================
+    // 3.5 VÍA SIN PROXY: CATÁLOGO CINEMETA (CORS ABIERTO) + SERVIDORES EMBED
+    // Cinemeta (el catálogo oficial de Stremio) sirve pósters y sinopsis con
+    // CORS habilitado, y los servidores embed se abren en un <iframe>, que no
+    // necesita CORS. Resultado: búsqueda y reproducción funcionan aunque todos
+    // los proxies públicos estén caídos.
+    // =========================================================================
+    const CINEMETA_BASE = "https://v3-cinemeta.strem.io";
+
+    function cinemetaItem(m, kind) {
+      return {
+        id: `cinemeta_${m.id}`,
+        rawId: m.id,
+        imdbId: m.id,
+        ref: m.id,
+        title: m.name,
+        year: m.releaseInfo || "",
+        poster: m.poster || "",
+        synopsis: m.description || "",
+        kind: kind,
+        source: "Cinemeta (sin proxy)"
+      };
+    }
+
+    async function fetchCinemetaCatalog(type, searchQuery) {
+      const url = searchQuery
+        ? `${CINEMETA_BASE}/catalog/${type}/top/search=${encodeURIComponent(searchQuery)}.json`
+        : `${CINEMETA_BASE}/catalog/${type}/top.json`;
+      try {
+        const r = await smartFetch(url, { timeoutMs: 20000 });
+        if (!r.ok || !r.text) return [];
+        const d = JSON.parse(r.text);
+        return (d.metas || []).map(m => cinemetaItem(m, type === "series" ? "series" : "movie"));
+      } catch (_) { return []; }
+    }
+
+    // Servidores embed por ID de IMDb: se reproducen en iframe (sin CORS).
+    // Cada uno es una página de terceros con su propio reproductor y publicidad.
+    function getSourcesForTitle(imdbId, title, isSeries = false, season = 1, episode = 1) {
+      const sources = [];
+      if (!imdbId || !imdbId.startsWith("tt")) return sources;
+      if (isSeries) {
+        sources.push({ name: "Embed69 Latino", badge: "Latino / Sub", type: "embed",
+          url: `https://embed69.org/tv/${imdbId}/${season}/${episode}` });
+        sources.push({ name: "AutoEmbed HD Multi-idioma", badge: "Multi HD", type: "embed",
+          url: `https://player.autoembed.cc/embed/tv/${imdbId}/${season}/${episode}` });
+        sources.push({ name: "MultiEmbed / Cuevana Player", badge: "1080p", type: "embed",
+          url: `https://multiembed.mov/?video_id=${imdbId}&s=${season}&e=${episode}` });
+        sources.push({ name: "VidSrc TV", badge: "Sub / Original", type: "embed",
+          url: `https://vidsrc.to/embed/tv/${imdbId}/${season}/${episode}` });
+      } else {
+        sources.push({ name: "Embed69 Latino", badge: "Latino / Castellano", type: "embed",
+          url: `https://embed69.org/movie/${imdbId}` });
+        sources.push({ name: "AutoEmbed HD Multi-idioma", badge: "Multi HD", type: "embed",
+          url: `https://player.autoembed.cc/embed/movie/${imdbId}` });
+        sources.push({ name: "MultiEmbed / Cuevana Player", badge: "1080p", type: "embed",
+          url: `https://multiembed.mov/?video_id=${imdbId}` });
+        sources.push({ name: "VidSrc Movies", badge: "Sub / Original", type: "embed",
+          url: `https://vidsrc.to/embed/movie/${imdbId}` });
+        sources.push({ name: "SmashyStream HD", badge: "HD", type: "embed",
+          url: `https://embed.smashystream.com/playere.php?imdb=${imdbId}` });
+      }
+      return sources;
+    }
+
+    // Pinta la lista de servidores (embed + directos) en la ficha de detalle
+    function renderEmbedSources(item) {
+      const sl = document.getElementById("streamsList");
+      sl.innerHTML = "";
+      if (!state.activeSources.length) {
+        sl.innerHTML = "<p style='color:var(--muted); font-size:14px;'>No hay servidores embed para este título. Prueba '🔎 Buscar Streams en Plugins'.</p>";
+        return;
+      }
+      const head = document.createElement("h3");
+      head.style.cssText = "font-size:16px; margin-bottom:4px;";
+      head.textContent = "🌐 Servidores Embed (funcionan sin proxy)";
+      sl.appendChild(head);
+      state.activeSources.forEach((src, idx) => {
+        const row = document.createElement("div");
+        row.className = "stream-item focusable";
+        row.tabIndex = 0;
+        row.innerHTML = `
+          <div>
+            <strong>${src.name}</strong> <span class="stream-badge">${src.badge || "HD"}</span>
+            <div style="font-size:12px; color:var(--muted); margin-top:2px; max-width:600px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${src.url}</div>
+          </div>
+          <div class="btn-group">
+            <button class="action-btn small focusable" data-play-server="${idx}">▶ Reproducir Aquí</button>
+            <button class="action-btn blue small focusable" data-browser-server="${idx}">🌐 Navegador TV</button>
+            <button class="action-btn secondary small focusable" data-native-server="${idx}">🟡 Nativo VIDAA</button>
+          </div>
+        `;
+        row.querySelector("[data-play-server]").addEventListener("click", e => {
+          e.stopPropagation();
+          state.currentSourceIndex = idx;
+          startPlaybackSource(src, item.title);
+        });
+        row.querySelector("[data-browser-server]").addEventListener("click", e => {
+          e.stopPropagation();
+          window.open(src.url, "_blank");
+          setStatus("Abierto en el navegador del TV");
+        });
+        row.querySelector("[data-native-server]").addEventListener("click", e => {
+          e.stopPropagation();
+          handoffToVidaaNativePlayer(src.url, item.title);
+        });
+        sl.appendChild(row);
+      });
+    }
+
+    // Carga el selector de episodios de una serie desde Cinemeta y reconstruye
+    // las URLs embed al cambiar de capítulo (llevan temporada/episodio dentro)
+    async function loadCinemetaEpisodes(item, imdb) {
+      try {
+        const r = await smartFetch(`${CINEMETA_BASE}/meta/series/${encodeURIComponent(imdb)}.json`, { timeoutMs: 20000 });
+        if (!r.ok || !r.text) return;
+        const m = JSON.parse(r.text).meta;
+        if (!m || !Array.isArray(m.videos) || m.videos.length <= 1) return;
+        if (m.description) document.getElementById("detailDesc").textContent = m.description;
+        const epSec = document.getElementById("episodesSection");
+        epSec.innerHTML = `<h3 style="font-size:16px; margin-bottom:8px;">Seleccionar Episodio (${m.videos.length})</h3><div class="episodes-grid" id="epGrid"></div>`;
+        const epGrid = document.getElementById("epGrid");
+        m.videos.slice(0, 120).forEach((v, idx) => {
+          const b = document.createElement("button");
+          b.className = "ep-btn focusable" + (idx === 0 ? " active" : "");
+          const sNum = v.season || 1, eNum = v.episode || v.number || (idx + 1);
+          b.textContent = `T${sNum}:E${eNum} · ${v.name || v.title || "Episodio " + eNum}`;
+          b.addEventListener("click", () => {
+            epGrid.querySelectorAll(".ep-btn").forEach(btn => btn.classList.remove("active"));
+            b.classList.add("active");
+            state.selectedSeason = sNum;
+            state.selectedEpisode = eNum;
+            state.activeSources = getSourcesForTitle(imdb, item.title, true, sNum, eNum);
+            renderEmbedSources(item);
+            setStatus(`Servidores actualizados para T${sNum}:E${eNum}`);
+          });
+          epGrid.appendChild(b);
+        });
+      } catch (_) {}
+    }
+
+    // =========================================================================
+    // 4. CARGA DE INICIO (HOME), CANALES EN VIVO Y BÚSQUEDA MULTIFUENTE
+    // =========================================================================
+    async function refreshHomeCatalog() {
+      setStatus("Cargando filas desde tus plugins instalados...");
+      const allRows = [];
+
+      // Vía sin proxy: tendencias de Cinemeta primero (CORS abierto, nunca se cuelga)
+      try {
+        const [cmMovies, cmSeries] = await withTimeout(
+          Promise.all([fetchCinemetaCatalog("movie"), fetchCinemetaCatalog("series")]),
+          25000, "cinemeta home");
+        if (cmMovies.length) allRows.push({ row: "⭐ Películas Populares (sin proxy)", sourceName: "Cinemeta", items: cmMovies.slice(0, 24) });
+        if (cmSeries.length) allRows.push({ row: "📺 Series Populares (sin proxy)", sourceName: "Cinemeta", items: cmSeries.slice(0, 24) });
+      } catch (_) {}
+
+      for (const inst of state.installed) {
+        if (inst.enabled === false) continue;
+        try {
+          if (inst.stremio) {
+            const sRows = await withTimeout(fetchStremioAddonHome(inst), 40000, inst.name);
+            allRows.push(...sRows);
+          } else if (inst.address) {
+            const res = await withTimeout(callPluginFn(inst, "home"), 45000, inst.name);
+            const rowsList = Array.isArray(res) ? res : (res && Array.isArray(res.rows) ? res.rows : []);
+            rowsList.forEach(r => {
+              const items = Array.isArray(r.items) ? r.items : [];
+              if (!items.length) return;
+              allRows.push({
+                row: `${inst.name} · ${r.title || r.name || "Destacados"}`,
+                sourceId: inst.id,
+                sourceName: inst.name,
+                items: items.slice(0, 30).map(it => ({
+                  id: `${inst.id}_${it.id || it.ref || it.title}`,
+                  ref: it.ref || it.id,
+                  title: it.title || it.name || "Sin título",
+                  year: it.year || "",
+                  poster: it.poster || it.image || it.cover || "",
+                  backdrop: it.backdrop || "",
+                  synopsis: it.overview || it.synopsis || it.description || "",
+                  kind: it.kind || it.type || "movie",
+                  video: it.url || it.video || "",
+                  pluginId: inst.id,
+                  source: inst.name
+                }))
+              });
+            });
+
+            // Si el plugin también exporta channels(), agregarlos a En Vivo
+            try {
+              const chRes = await withTimeout(callPluginFn(inst, "channels"), 25000, inst.name);
+              const chList = Array.isArray(chRes) ? chRes : (chRes && Array.isArray(chRes.channels) ? chRes.channels : []);
+              if (chList.length) {
+                chList.slice(0, 120).forEach(ch => {
+                  const exists = state.liveChannels.some(x => x.name === ch.name && x.pluginId === inst.id);
+                  if (!exists) {
+                    state.liveChannels.push({
+                      name: ch.name || ch.title || "Canal",
+                      group: ch.group || inst.name,
+                      logo: ch.logo || ch.poster || "",
+                      url: ch.url || "",
+                      ref: ch.ref || ch.id || "",
+                      pluginId: inst.id
+                    });
+                  }
+                });
+              }
+            } catch (_) {}
+          }
+        } catch (err) {
+          console.warn(`Error cargando Home de ${inst.name}:`, err);
+        }
+      }
+
+      state.homeRows = allRows;
+      setStatus(allRows.length ? `Inicio actualizado (${allRows.length} filas activas)` : "Instala o activa plugins en la Tienda para poblar tu Inicio");
+      if (state.view === "home") renderView();
+    }
+
+    // =========================================================================
+    // 5. RENDERIZADO DE PANTALLAS (INICIO, BUSCAR, TIENDA DE PLUGINS, EN VIVO)
+    // =========================================================================
+    function renderCardGrid(items) {
+      const grid = document.createElement("div");
+      grid.className = "cards-grid";
+      items.forEach(item => {
+        const card = document.createElement("div");
+        card.className = "card focusable";
+        card.tabIndex = 0;
+        const fallbackImg = "https://avatars.githubusercontent.com/u/332969319?s=200&v=4";
+        card.innerHTML = `
+          <img class="card-poster" src="${item.poster || fallbackImg}" alt="${item.title}" />
+          <div class="card-body">
+            <div class="card-title">${item.title}</div>
+            <div class="card-meta">${item.year ? item.year + " · " : ""}${item.source || "Kino"}</div>
+          </div>
+        `;
+        const imgEl = card.querySelector("img");
+        imgEl.addEventListener("error", () => { imgEl.src = fallbackImg; });
+        card.addEventListener("click", () => openDetail(item));
+        grid.appendChild(card);
+      });
+      return grid;
+    }
+
+    function isInstalled(id) {
+      return state.installed.some(x => x.id === id);
+    }
+
+    async function toggleInstallPlugin(entry) {
+      const idx = state.installed.findIndex(x => x.id === entry.id);
+      if (idx >= 0) {
+        state.installed.splice(idx, 1);
+        delete state.loadedModules[entry.id];
+        saveStore("kino_installed_v2", state.installed);
+        updateBadges();
+        setStatus(`Desinstalado: ${entry.name}`);
+        renderView();
+        refreshHomeCatalog();
+        return;
+      }
+
+      const newInst = {
+        id: entry.id,
+        name: entry.name,
+        address: entry.address || null,
+        stremio: entry.stremio || null,
+        enabled: true
+      };
+      state.installed.push(newInst);
+      saveStore("kino_installed_v2", state.installed);
+      updateBadges();
+      setStatus(`Instalando y cargando ${entry.name}...`);
+      renderView();
+      await refreshHomeCatalog();
+      setStatus(`✅ ${entry.name} instalado y activo`);
+    }
+
+    async function openPluginConfigModal(entry) {
+      state.configuringPlugin = entry;
+      const overlay = document.getElementById("configOverlay");
+      document.getElementById("configPluginTitle").textContent = `Configurar: ${entry.name}`;
+      document.getElementById("configPluginSub").textContent = entry.address ? `Repositorio GitHub: ${entry.address}` : (entry.stremio || "");
+      const box = document.getElementById("configFieldsBox");
+      box.innerHTML = "<p style='color:var(--muted)'>Leyendo opciones del manifiesto...</p>";
+      overlay.classList.add("open");
+
+      let settings = [];
+      let pluginMod = null;
+      if (entry.address) {
+        try {
+          pluginMod = await loadGitHubPlugin(entry);
+          if (pluginMod && pluginMod.manifest && Array.isArray(pluginMod.manifest.settings)) {
+            settings = pluginMod.manifest.settings;
+          }
+        } catch (_) {}
+      }
+
+      box.innerHTML = "";
+      const currentCfg = state.pluginConfigs[entry.id] || {};
+      if (!settings.length) {
+        box.innerHTML = `
+          <div style="margin-bottom:12px;">
+            <label style="display:block; font-size:13px; color:var(--muted); margin-bottom:6px;">URL / Servidor o Parámetro Opcional</label>
+            <input class="tv-input focusable" data-cfg-key="url1" value="${currentCfg.url1 || ""}" placeholder="https://..." style="width:100%;" />
+          </div>
+        `;
+      } else {
+        // Renderiza cada campo según su tipo del manifiesto (section, select, status, action, texto)
+        settings.slice(0, 14).forEach(s => {
+          if (!s || !s.key) return;
+          const type = String(s.type || "text").toLowerCase();
+          const label = s.label || s.title || s.key;
+
+          if (type === "section") {
+            const h = document.createElement("div");
+            h.style.cssText = "margin:14px 0 8px; font-size:14px; font-weight:700; color:#e4e8f5;";
+            h.textContent = label;
+            if (s.hint) {
+              const hint = document.createElement("div");
+              hint.style.cssText = "font-size:12px; color:var(--muted); font-weight:400; margin-top:3px;";
+              hint.textContent = s.hint;
+              h.appendChild(hint);
+            }
+            box.appendChild(h);
+            return;
+          }
+
+          if (type === "status") {
+            const row = document.createElement("div");
+            row.style.cssText = "margin-bottom:12px; font-size:13px; color:var(--muted);";
+            row.innerHTML = `<strong style="color:#e4e8f5;">${label}:</strong> <span data-status-line="${s.key}">…</span>`;
+            box.appendChild(row);
+            if (pluginMod && pluginMod.exports && typeof pluginMod.exports.settingsStatus === "function") {
+              (async () => {
+                try {
+                  globalThis.kino = pluginMod.env;
+                  const st = await pluginMod.exports.settingsStatus();
+                  const el = box.querySelector(`[data-status-line="${s.key}"]`);
+                  if (el) el.textContent = (st && (st[s.key] || st.info)) || "—";
+                } catch (_) {
+                  const el = box.querySelector(`[data-status-line="${s.key}"]`);
+                  if (el) el.textContent = "—";
+                }
+              })();
+            }
+            return;
+          }
+
+          if (type === "action") {
+            const row = document.createElement("div");
+            row.style.marginBottom = "12px";
+            const btn = document.createElement("button");
+            btn.className = "action-btn secondary small focusable";
+            btn.textContent = label;
+            btn.addEventListener("click", async () => {
+              if (s.confirm && !confirm(s.confirm)) return;
+              btn.disabled = true;
+              btn.textContent = "…";
+              try {
+                const res = await callPluginFn(entry, "action", s.key);
+                btn.textContent = (res && res.message) || "✓ Listo";
+              } catch (e) {
+                btn.textContent = "Error";
+              }
+              setTimeout(() => { btn.disabled = false; btn.textContent = label; }, 2500);
+            });
+            row.appendChild(btn);
+            box.appendChild(row);
+            return;
+          }
+
+          if (type === "select" && Array.isArray(s.options)) {
+            const val = currentCfg[s.key] !== undefined ? currentCfg[s.key] : (s.default !== undefined ? s.default : "");
+            const row = document.createElement("div");
+            row.style.marginBottom = "12px";
+            row.innerHTML = `
+              <label style="display:block; font-size:13px; color:var(--muted); margin-bottom:5px;">${label}</label>
+              <select class="tv-input focusable" data-cfg-key="${s.key}" style="width:100%;">
+                ${s.options.map(o => `<option value="${o.value}" ${String(o.value) === String(val) ? "selected" : ""}>${o.label || o.value}</option>`).join("")}
+              </select>
+            `;
+            box.appendChild(row);
+            return;
+          }
+
+          // text / number / password / url y cualquier otro tipo simple
+          const val = currentCfg[s.key] !== undefined ? currentCfg[s.key] : (s.default || "");
+          const row = document.createElement("div");
+          row.style.marginBottom = "12px";
+          row.innerHTML = `
+            <label style="display:block; font-size:13px; color:var(--muted); margin-bottom:5px;">${label}</label>
+            <input class="tv-input focusable" data-cfg-key="${s.key}" value="${String(val)}" placeholder="${s.placeholder || s.description || ''}" style="width:100%;" />
+          `;
+          box.appendChild(row);
+        });
+      }
+    }
+
+    function renderPluginsStoreView() {
+      viewTitle.textContent = `Tienda de Plugins de Kino (${state.storeEntries.length} disponibles)`;
+      const wrap = document.createElement("div");
+
+      // Pestañas superiores de la tienda (Igual que Kino 0.9.77+: De Kino, De la comunidad, Instalados, Manual)
+      const tabsBar = document.createElement("div");
+      tabsBar.className = "tabs-bar";
+      const tabs = [
+        { id: "official", label: `⭐ De Kino (${state.storeEntries.filter(e => e.recommended).length})` },
+        { id: "community", label: `🌐 De la Comunidad (${state.storeEntries.filter(e => !e.recommended).length})` },
+        { id: "installed", label: `✅ Instalados (${state.installed.length})` },
+        { id: "manual", label: "➕ Agregar por GitHub / URL" }
+      ];
+      tabs.forEach(t => {
+        const b = document.createElement("button");
+        b.className = "pill-btn focusable" + (state.storeTab === t.id ? " active" : "");
+        b.textContent = t.label;
+        b.addEventListener("click", () => { state.storeTab = t.id; renderView(); });
+        tabsBar.appendChild(b);
+      });
+
+      const syncBtn = document.createElement("button");
+      syncBtn.className = "action-btn secondary small focusable";
+      syncBtn.textContent = "🔄 Actualizar Catálogo desde GitHub";
+      syncBtn.addEventListener("click", syncPluginStoreFromGitHub);
+      tabsBar.appendChild(syncBtn);
+      wrap.appendChild(tabsBar);
+
+      if (state.storeTab === "manual") {
+        const manualBox = document.createElement("div");
+        manualBox.innerHTML = `
+          <div class="list-box" style="flex-direction:column; align-items:stretch; gap:14px;">
+            <h3>Instalar cualquier Plugin de Kino (GitHub) o Addon de Stremio</h3>
+            <p style="color:var(--muted); font-size:14px;">Escribe <code>usuario/repositorio</code> de GitHub (con <code>kino-plugin.json</code>) o pega una URL terminada en <code>manifest.json</code>:</p>
+            <div class="input-row" style="margin-bottom:0;">
+              <input id="customPluginInput" class="tv-input focusable" placeholder="Ej: YojaTV-kino/YojaTV_plugin o https://.../manifest.json" />
+              <button id="customPluginInstallBtn" class="action-btn focusable">+ Instalar Ahora</button>
+            </div>
+          </div>
+        `;
+        wrap.appendChild(manualBox);
+        viewContent.appendChild(wrap);
+        document.getElementById("customPluginInstallBtn").addEventListener("click", async () => {
+          const raw = document.getElementById("customPluginInput").value.trim();
+          if (!raw) return;
+          if (raw.endsWith("manifest.json")) {
+            const id = "custom_" + Math.random().toString(36).slice(2, 8);
+            await toggleInstallPlugin({ id, name: "Addon Personalizado", stremio: raw });
+          } else {
+            const cleanRepo = raw.replace("https://github.com/", "").replace(/\/$/, "");
+            const id = cleanRepo.split("/").pop().toLowerCase();
+            await toggleInstallPlugin({ id, name: cleanRepo, address: cleanRepo });
+          }
+        });
+        return;
+      }
+
+      // Barra de categorías y filtro de texto
+      const catBar = document.createElement("div");
+      catBar.className = "cat-bar";
+      const cats = [
+        { id: "all", label: "Todos" },
+        { id: "movies", label: "🎬 Películas" },
+        { id: "series", label: "📺 Series" },
+        { id: "anime", label: "🎌 Anime" },
+        { id: "live", label: "📡 En Vivo" },
+        { id: "radio", label: "📻 Radio" },
+        { id: "subtitles", label: "💬 Subtítulos" },
+        { id: "utilities", label: "🛠️ Utilidades" }
+      ];
+      if (state.showAdult) cats.push({ id: "adult", label: "🔞 18+" });
+
+      cats.forEach(c => {
+        const b = document.createElement("button");
+        b.className = "pill-btn focusable" + (state.storeCategory === c.id ? " active" : "");
+        b.textContent = c.label;
+        b.addEventListener("click", () => { state.storeCategory = c.id; renderView(); });
+        catBar.appendChild(b);
+      });
+      wrap.appendChild(catBar);
+
+      const filterRow = document.createElement("div");
+      filterRow.className = "input-row";
+      filterRow.innerHTML = `
+        <input id="storeFilterInput" class="tv-input focusable" value="${state.storeQuery}" placeholder="Filtrar plugins por nombre, autor o descripción (ej. Latino, Anime, TV, Yoja, CineHax, Pluto)..." />
+      `;
+      wrap.appendChild(filterRow);
+
+      // Filtrar lista de plugins
+      let list = state.storeEntries.filter(e => {
+        const isAdult = Array.isArray(e.categories) && e.categories.includes("adult");
+        if (isAdult && !state.showAdult && state.storeCategory !== "adult") return false;
+        if (state.storeTab === "official" && !e.recommended) return false;
+        if (state.storeTab === "community" && e.recommended) return false;
+        if (state.storeTab === "installed" && !isInstalled(e.id)) return false;
+        if (state.storeCategory !== "all" && (!Array.isArray(e.categories) || !e.categories.includes(state.storeCategory))) return false;
+        if (state.storeQuery) {
+          const q = state.storeQuery.toLowerCase();
+          const hay = `${e.name} ${e.description} ${e.address || ""} ${e.author || ""}`.toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      });
+
+      const grid = document.createElement("div");
+      grid.className = "plugins-grid";
+      const fallbackIcon = "https://avatars.githubusercontent.com/u/332969319?s=120&v=4";
+
+      list.forEach(entry => {
+        const installed = isInstalled(entry.id);
+        const card = document.createElement("div");
+        card.className = "plugin-card" + (installed ? " installed" : "");
+        const sourceBadge = entry.stremio
+          ? `<span class="tag-chip stremio">Stremio Addon</span>`
+          : `<span class="tag-chip">${entry.address || "Kino Plugin"}</span>`;
+        const officialBadge = entry.recommended ? `<span class="tag-chip official">De Kino</span>` : "";
+        const catChips = (entry.categories || []).map(c => `<span class="tag-chip">${c}</span>`).join("");
+
+        card.innerHTML = `
+          <div>
+            <div class="plugin-top">
+              <img class="plugin-icon" src="${entry.icon || fallbackIcon}" alt="${entry.name}" />
+              <div style="min-width:0;">
+                <div class="plugin-title">${entry.name} ${entry.version ? `<small style="color:var(--muted); font-weight:500;">v${entry.version}</small>` : ""}</div>
+                <div class="plugin-sub">${entry.author ? "Por " + entry.author : (entry.address || "Oficial")}</div>
+              </div>
+            </div>
+            <p class="plugin-desc" style="margin-top:10px;">${entry.description || "Sin descripción."}</p>
+          </div>
+          <div>
+            <div class="plugin-tags" style="margin-bottom:10px;">
+              ${officialBadge}
+              ${sourceBadge}
+              ${catChips}
+            </div>
+            <div class="plugin-actions">
+              <button class="action-btn small focusable ${installed ? 'success' : ''}" data-action="toggle">
+                ${installed ? "✓ Instalado (Desinstalar)" : "+ Instalar"}
+              </button>
+              ${entry.address ? `<button class="action-btn secondary small focusable" data-action="config">⚙️ Configurar</button>` : ""}
+              ${installed ? `<button class="action-btn secondary small focusable" data-action="test">▶ Probar Home</button>` : ""}
+            </div>
+          </div>
+        `;
+        const img = card.querySelector("img");
+        img.addEventListener("error", () => { img.src = fallbackIcon; });
+        card.querySelector('[data-action="toggle"]').addEventListener("click", () => toggleInstallPlugin(entry));
+        const cfgBtn = card.querySelector('[data-action="config"]');
+        if (cfgBtn) cfgBtn.addEventListener("click", () => openPluginConfigModal(entry));
+        const testBtn = card.querySelector('[data-action="test"]');
+        if (testBtn) testBtn.addEventListener("click", async () => {
+          state.view = "home";
+          renderView();
+          await refreshHomeCatalog();
+        });
+        grid.appendChild(card);
+      });
+
+      wrap.appendChild(grid);
+      viewContent.appendChild(wrap);
+
+      const filterInput = document.getElementById("storeFilterInput");
+      filterInput.addEventListener("input", e => {
+        state.storeQuery = e.target.value;
+        const pos = filterInput.selectionStart;
+        renderView();
+        const newInput = document.getElementById("storeFilterInput");
+        if (newInput) { newInput.focus(); newInput.setSelectionRange(pos, pos); }
+      });
+    }
+
+    async function syncPluginStoreFromGitHub() {
+      setStatus("Sincronizando índice de plugins con kinotvapp/kino-plugins...");
+      try {
+        const [idxRes, catRes] = await Promise.all([
+          smartFetch("https://raw.githubusercontent.com/kinotvapp/kino-plugins/main/index.json"),
+          smartFetch("https://raw.githubusercontent.com/kinotvapp/kino-plugins/main/catalog.json")
+        ]);
+        const newComm = idxRes.ok ? (JSON.parse(idxRes.text).entries || KINO_COMMUNITY_STORE) : KINO_COMMUNITY_STORE;
+        const newSeed = catRes.ok ? (JSON.parse(catRes.text).plugins || KINO_SEED_PLUGINS) : KINO_SEED_PLUGINS;
+        state.storeEntries = buildUnifiedStore(newSeed, newComm);
+        setStatus(`Tienda actualizada: ${state.storeEntries.length} plugins disponibles`);
+        renderView();
+      } catch (e) {
+        setStatus("Usando catálogo integrado de Kino v0.9.79");
+      }
+    }
+
+    function renderView() {
+      viewContent.innerHTML = "";
+      updateBadges();
+      document.querySelectorAll(".nav-btn[data-view]").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.view === state.view);
+      });
+
+      if (state.view === "home") {
+        viewTitle.textContent = "Inicio";
+        const topActions = document.createElement("div");
+        topActions.className = "tabs-bar";
+        topActions.innerHTML = `
+          <button class="action-btn secondary small focusable" id="reloadHomeBtn">🔄 Recargar Filas de Plugins</button>
+          <button class="action-btn small focusable" id="goStoreBtn">🧩 Ir a Tienda de Plugins (${state.storeEntries.length})</button>
+        `;
+        viewContent.appendChild(topActions);
+        document.getElementById("reloadHomeBtn").addEventListener("click", refreshHomeCatalog);
+        document.getElementById("goStoreBtn").addEventListener("click", () => { state.view = "plugins"; renderView(); });
+
+        if (!state.homeRows.length) {
+          const empty = document.createElement("div");
+          empty.className = "list-box";
+          empty.innerHTML = `<div>Cargando filas de tus plugins activos (${state.installed.map(i => i.name).join(", ")})...</div>`;
+          viewContent.appendChild(empty);
+        } else {
+          state.homeRows.forEach(section => {
+            const rowDiv = document.createElement("div");
+            rowDiv.className = "row-section";
+            rowDiv.innerHTML = `
+              <div class="row-header">
+                <div class="row-title">${section.row} <span class="row-source-tag">${section.sourceName || "Plugin"}</span></div>
+              </div>
+            `;
+            rowDiv.appendChild(renderCardGrid(section.items));
+            viewContent.appendChild(rowDiv);
+          });
+        }
+      } else if (state.view === "plugins") {
+        renderPluginsStoreView();
+      } else if (state.view === "search") {
+        viewTitle.textContent = "Buscar en Todos tus Plugins Instalados";
+        const box = document.createElement("div");
+        box.innerHTML = `
+          <div class="input-row">
+            <input id="searchInput" class="tv-input focusable" type="text" placeholder="Escribe una película, serie o anime para buscar en todos tus plugins activos..." />
+            <button id="searchRunBtn" class="action-btn focusable">🔍 Buscar</button>
+          </div>
+          <div id="searchResults"></div>
+        `;
+        viewContent.appendChild(box);
+        const input = document.getElementById("searchInput");
+        const runBtn = document.getElementById("searchRunBtn");
+        const resultsDiv = document.getElementById("searchResults");
+
+        const executeMultiSearch = async () => {
+          const q = input.value.trim();
+          if (!q) return;
+          const runToken = ++state.searchRun; // invalida búsquedas anteriores
+          const active = state.installed.filter(i => i.enabled !== false);
+          setStatus(`Buscando "${q}" en ${active.length} plugins...`);
+          resultsDiv.innerHTML = "";
+          const progress = document.createElement("p");
+          progress.style.cssText = "color:var(--muted); font-size:14px; margin-bottom:10px;";
+          progress.textContent = `Consultando ${active.length} plugins… los resultados aparecen conforme responden.`;
+          resultsDiv.appendChild(progress);
+          let answered = 0;
+          let withResults = 0;
+
+          const addGroup = (g, putFirst) => {
+            if (state.searchRun !== runToken) return;
+            const sec = document.createElement("div");
+            sec.className = "row-section";
+            sec.innerHTML = `<div class="row-title">Resultados en ${g.title}</div>`;
+            sec.appendChild(renderCardGrid(g.items));
+            if (putFirst) resultsDiv.insertBefore(sec, progress.nextSibling);
+            else resultsDiv.appendChild(sec);
+          };
+
+          // Vía sin proxy: Cinemeta (catálogo oficial Stremio) tiene CORS abierto
+          // y responde enseguida — sus resultados aparecen primero, aunque todos
+          // los plugins sigan peleando con los proxies.
+          const cinemetaTask = withTimeout(Promise.all([fetchCinemetaCatalog("movie", q), fetchCinemetaCatalog("series", q)]), 25000, "cinemeta")
+            .then(([cmMovies, cmSeries]) => {
+              if (state.searchRun !== runToken) return;
+              if (cmSeries.length) { withResults++; addGroup({ title: "Series (Cinemeta · servidores embed, sin proxy)", items: cmSeries.slice(0, 18) }, true); }
+              if (cmMovies.length) { withResults++; addGroup({ title: "Películas (Cinemeta · servidores embed, sin proxy)", items: cmMovies.slice(0, 18) }, true); }
+            })
+            .catch(() => {});
+
+          // Busca en UN plugin y devuelve sus grupos de resultados (sin tocar el DOM)
+          const searchOnePlugin = async (inst) => {
+            const found = [];
+            if (inst.stremio) {
+              const baseUrl = inst.stremio.replace(/\/manifest\.json$/i, "");
+              for (const t of ["movie", "series"]) {
+                try {
+                  const u = `${baseUrl}/catalog/${t}/top/search=${encodeURIComponent(q)}.json`;
+                  const r = await smartFetch(u);
+                  if (r.ok) {
+                    const d = JSON.parse(r.text);
+                    if (d.metas && d.metas.length) {
+                      found.push({
+                        title: `${inst.name} (${t})`,
+                        items: d.metas.slice(0, 18).map(m => ({
+                          id: `${inst.id}_${m.id}`,
+                          rawId: m.id,
+                          ref: m.id,
+                          title: m.name,
+                          year: m.releaseInfo || "",
+                          poster: m.poster || "",
+                          synopsis: m.description || "",
+                          kind: m.type || t,
+                          stremioBase: baseUrl,
+                          stremioType: m.type || t,
+                          pluginId: inst.id,
+                          source: inst.name
+                        }))
+                      });
+                    }
+                  }
+                } catch (_) {}
+              }
+            } else if (inst.address) {
+              let res = null;
+              try {
+                res = await callPluginFn(inst, "search", { q, query: q, type: "movie", originalTitle: q, altTitles: [] });
+              } catch (_) {
+                try { res = await callPluginFn(inst, "search", q); } catch (_) {}
+              }
+              const list = Array.isArray(res) ? res : (res && Array.isArray(res.items) ? res.items : []);
+              if (list.length) {
+                found.push({
+                  title: inst.name,
+                  items: list.slice(0, 24).map(it => ({
+                    id: `${inst.id}_${it.id || it.ref || it.title}`,
+                    ref: it.ref || it.id,
+                    title: it.title || it.name || "Sin título",
+                    year: it.year || "",
+                    poster: it.poster || it.image || "",
+                    synopsis: it.overview || it.synopsis || "",
+                    kind: it.kind || it.type || "movie",
+                    video: it.url || it.video || "",
+                    pluginId: inst.id,
+                    source: inst.name
+                  }))
+                });
+              }
+            }
+            return found;
+          };
+
+          // Todos los plugins EN PARALELO, cada uno con su propio límite de 30 s:
+          // un plugin lento o caído ya no congela a los demás.
+          const tasks = active.map(inst =>
+            withTimeout(searchOnePlugin(inst), 30000, inst.name)
+              .then(groups => {
+                groups.forEach(g => { withResults++; addGroup(g); });
+              })
+              .catch(e => console.warn(`Búsqueda en ${inst.name}:`, e && e.message))
+              .finally(() => {
+                answered++;
+                if (state.searchRun === runToken) {
+                  progress.textContent = `Consultando plugins… ${answered}/${active.length} respondieron.`;
+                  setStatus(`Buscando "${q}" · ${answered}/${active.length} fuentes · ${withResults} con resultados`);
+                }
+              })
+          );
+          await Promise.allSettled([...tasks, cinemetaTask]);
+          if (state.searchRun !== runToken) return; // el usuario lanzó otra búsqueda
+
+          if (!withResults) {
+            resultsDiv.innerHTML = "<p style='color:var(--muted)'>No se encontraron resultados. Revisa Ajustes ▸ Probar Conexión, o instala más plugins desde la Tienda.</p>";
+          } else {
+            progress.textContent = `✅ ${withResults} fuentes con resultados de ${active.length} plugins.`;
+          }
+          setStatus(`Búsqueda completada (${withResults} fuentes con resultados)`);
+        };
+        runBtn.addEventListener("click", executeMultiSearch);
+        input.addEventListener("keydown", e => { if (e.key === "Enter") executeMultiSearch(); });
+      } else if (state.view === "livetv") {
+        viewTitle.textContent = `Canales en Vivo (${state.liveChannels.length} canales)`;
+        const container = document.createElement("div");
+        container.innerHTML = `
+          <div class="input-row">
+            <input id="m3uName" class="tv-input focusable" placeholder="Nombre del canal o lista M3U" />
+            <input id="m3uUrl" class="tv-input focusable" placeholder="URL .m3u8 / .mp4 o lista .m3u completa" />
+            <button id="addM3uBtn" class="action-btn focusable">+ Agregar Canal / Lista M3U</button>
+          </div>
+          <div id="channelsList"></div>
+        `;
+        viewContent.appendChild(container);
+        const listDiv = document.getElementById("channelsList");
+        const renderChannels = () => {
+          listDiv.innerHTML = "";
+          state.liveChannels.forEach((ch, idx) => {
+            const row = document.createElement("div");
+            row.className = "list-box";
+            row.innerHTML = `
+              <div>
+                <strong>📺 ${ch.name}</strong> <span class="tag-chip">${ch.group || "En Vivo"}</span>
+                <div style="font-size:12px; color:var(--muted); margin-top:3px;">${ch.url || ("Plugin: " + (ch.pluginId || "Kino"))}</div>
+              </div>
+              <div class="btn-group">
+                <button class="action-btn small focusable" data-play="${idx}">▶ Reproducir</button>
+                <button class="action-btn secondary small focusable" data-del="${idx}">🗑</button>
+              </div>
+            `;
+            row.querySelector("[data-play]").addEventListener("click", async () => {
+              if (ch.url) {
+                startPlayback(ch.url, ch.name);
+              } else if (ch.pluginId && ch.ref) {
+                const inst = state.installed.find(x => x.id === ch.pluginId);
+                if (inst) {
+                  setStatus(`Resolviendo canal ${ch.name}...`);
+                  const r = await withTimeout(callPluginFn(inst, "resolve", ch.ref), 45000, inst.name);
+                  const streamUrl = r && (r.url || (Array.isArray(r.copies) && r.copies[0] && r.copies[0].url));
+                  if (streamUrl) startPlayback(streamUrl, ch.name);
+                  else setStatus("No se pudo obtener stream del canal");
+                }
+              }
+            });
+            row.querySelector("[data-del]").addEventListener("click", () => {
+              state.liveChannels.splice(idx, 1);
+              saveStore("kino_m3u_v2", state.liveChannels);
+              renderChannels();
+            });
+            listDiv.appendChild(row);
+          });
+        };
+        renderChannels();
+        document.getElementById("addM3uBtn").addEventListener("click", async () => {
+          const name = document.getElementById("m3uName").value.trim() || "Canal M3U";
+          const url = document.getElementById("m3uUrl").value.trim();
+          if (!url) return;
+          if (url.endsWith(".m3u") || url.includes("m3u")) {
+            try {
+              setStatus("Importando lista M3U...");
+              const r = await smartFetch(url);
+              const lines = r.text.split(/\r?\n/);
+              let currentName = "Canal M3U";
+              lines.forEach(line => {
+                if (line.startsWith("#EXTINF:")) {
+                  const parts = line.split(",");
+                  currentName = parts[parts.length - 1].trim() || "Canal M3U";
+                } else if (line.startsWith("http")) {
+                  state.liveChannels.push({ name: currentName, url: line.trim(), group: name });
+                }
+              });
+              saveStore("kino_m3u_v2", state.liveChannels);
+              renderChannels();
+              setStatus("Lista M3U importada");
+              return;
+            } catch (_) {}
+          }
+          state.liveChannels.push({ name, url, group: "Personalizado" });
+          saveStore("kino_m3u_v2", state.liveChannels);
+          renderChannels();
+        });
+      } else if (state.view === "favorites") {
+        viewTitle.textContent = "Mi Biblioteca (Favoritos)";
+        if (!state.favorites.length) {
+          viewContent.innerHTML = "<p style='color:var(--muted)'>Aún no tienes títulos guardados en Favoritos.</p>";
+        } else {
+          viewContent.appendChild(renderCardGrid(state.favorites));
+        }
+      } else if (state.view === "settings") {
+        viewTitle.textContent = "Ajustes de Kino VIDAA y Puente CORS";
+        const box = document.createElement("div");
+        box.innerHTML = `
+          <div class="list-box" style="flex-direction:column; align-items:stretch; gap:12px;">
+            <h3>1. Modo de Conexión para Plugins (Puente CORS)</h3>
+            <p style="color:var(--muted); font-size:14px;">Como la app corre en el navegador de VIDAA TV sobre GitHub Pages, algunos plugins comunitarios consultan sitios web que requieren proxy CORS.</p>
+            <div class="tabs-bar">
+              <button class="pill-btn focusable ${state.corsMode === 'auto' ? 'active' : ''}" data-cors="auto">Automático (Directo + Respaldo Proxy)</button>
+              <button class="pill-btn focusable ${state.corsMode === 'direct' ? 'active' : ''}" data-cors="direct">Solo Directo</button>
+            </div>
+            <input id="customProxyInput" class="tv-input focusable" value="${state.customProxy}" placeholder="URL de Proxy CORS propio opcional (ej. https://mi-worker.workers.dev/?url=)" />
+            <div class="btn-group">
+              <button id="testProxiesBtn" class="action-btn secondary focusable">📡 Probar Conexión con CineHD Plus (xuper)</button>
+            </div>
+            <div id="proxyTestResults" style="font-size:13px; color:var(--muted); line-height:1.7;"></div>
+          </div>
+          <div class="list-box" style="flex-direction:column; align-items:stretch; gap:12px;">
+            <h3>2. Llave API de TMDB (Opcional, para el plugin oficial TMDB)</h3>
+            <input id="tmdbKeyInput" class="tv-input focusable" value="${state.tmdbKey}" placeholder="Pega tu API Key v3 de TMDB (opcional)" />
+          </div>
+          <div class="list-box">
+            <div>
+              <strong>Mostrar categoría 18+ en la Tienda de Plugins</strong>
+              <div style="font-size:13px; color:var(--muted)">Oculta por defecto, igual que en Kino APK.</div>
+            </div>
+            <button id="toggleAdultBtn" class="action-btn secondary focusable">${state.showAdult ? "Activado" : "Desactivado"}</button>
+          </div>
+          <button id="saveSettingsBtn" class="action-btn focusable">💾 Guardar Ajustes</button>
+        `;
+        viewContent.appendChild(box);
+        box.querySelectorAll("[data-cors]").forEach(b => {
+          b.addEventListener("click", () => {
+            state.corsMode = b.dataset.cors;
+            saveStore("kino_cors_mode", state.corsMode);
+            renderView();
+          });
+        });
+        document.getElementById("toggleAdultBtn").addEventListener("click", () => {
+          state.showAdult = !state.showAdult;
+          saveStore("kino_show_adult", state.showAdult);
+          renderView();
+        });
+        document.getElementById("testProxiesBtn").addEventListener("click", async () => {
+          const out = document.getElementById("proxyTestResults");
+          const target = "https://cinehdplus.org/peliculas/?sort=recent";
+          const candidates = [];
+          if (document.getElementById("customProxyInput").value.trim()) {
+            candidates.push({ label: "Tu proxy propio", prefix: document.getElementById("customProxyInput").value.trim() });
+          }
+          candidates.push(
+            { label: "codetabs", prefix: "https://api.codetabs.com/v1/proxy?quest=" },
+            { label: "allorigins", prefix: "https://api.allorigins.win/raw?url=" },
+            { label: "cors.lol", prefix: "https://api.cors.lol/?url=" }
+          );
+          out.innerHTML = "Probando acceso a cinehdplus.org (puede tardar unos segundos por ruta)...<br>";
+          // 1) Conexión directa (solo posible si el sitio habilita CORS o el WebView lo permite)
+          try {
+            const t0 = Date.now();
+            const r = await fetchWithTimeout(target, { headers: { "Accept-Language": "es-MX,es;q=0.9" } }, 12000);
+            const txt = await readBodyCapped(r, 300000);
+            const blocked = looksBlocked({ status: r.status, text: txt });
+            out.innerHTML += `${r.ok && !blocked ? "✅" : "⚠️"} Directo (sin proxy): HTTP ${r.status} · ${((Date.now() - t0) / 1000).toFixed(1)}s${blocked ? " · Cloudflare lo protege, hará falta proxy" : ""}<br>`;
+          } catch (_) {
+            out.innerHTML += "❌ Directo (sin proxy): bloqueado por CORS en este navegador — normal en VIDAA, se usará proxy<br>";
+          }
+          // 2) Cada proxy de la cadena
+          for (const c of candidates) {
+            try {
+              const t0 = Date.now();
+              const r = await fetchWithTimeout(c.prefix + encodeURIComponent(target), {}, 15000);
+              const txt = await readBodyCapped(r, 300000);
+              const blocked = looksBlocked({ status: r.status, text: txt });
+              const okHtml = r.ok && !blocked && /<html|<!doctype/i.test(txt);
+              out.innerHTML += `${okHtml ? "✅" : "❌"} Proxy ${c.label}: HTTP ${r.status} · ${((Date.now() - t0) / 1000).toFixed(1)}s${okHtml ? " · funciona con CineHD Plus" : (blocked ? " · bloqueado o saturado" : " · respuesta inusual")}<br>`;
+              if (okHtml) { state.lastGoodProxy = c.prefix; saveStore("kino_last_proxy", c.prefix); }
+            } catch (_) {
+              out.innerHTML += `❌ Proxy ${c.label}: sin respuesta<br>`;
+            }
+          }
+          out.innerHTML += "<br>Si todos fallan, despliega un proxy propio (p. ej. un Cloudflare Worker) y pégalo arriba.";
+        });
+        document.getElementById("saveSettingsBtn").addEventListener("click", () => {
+          state.customProxy = document.getElementById("customProxyInput").value.trim();
+          state.tmdbKey = document.getElementById("tmdbKeyInput").value.trim();
+          saveStore("kino_custom_proxy", state.customProxy);
+          saveStore("kino_tmdb_key", state.tmdbKey);
+          setStatus("Ajustes guardados correctamente");
+        });
+      } else if (state.view === "diag") {
+        viewTitle.textContent = `Diagnóstico de Plugins y Red (build ${BUILD_TAG})`;
+        const wrap = document.createElement("div");
+        wrap.innerHTML = `
+          <div class="list-box" style="flex-direction:column; align-items:stretch; gap:12px;">
+            <div class="btn-group">
+              <button id="diagRunBtn" class="action-btn focusable">▶ Probar CineHD Plus (xuper) paso a paso</button>
+              <button id="diagCopyBtn" class="action-btn secondary focusable">📋 Copiar registro</button>
+              <button id="diagClearBtn" class="action-btn secondary focusable">🗑 Limpiar registro</button>
+            </div>
+            <p style="color:var(--muted); font-size:13px;">Todo lo que hacen los plugins queda registrado aquí: cada petición (ruta, vía, estado, tiempo) y cada error con su código. Si algo falla, mándanos una foto de este registro.</p>
+            <div id="diagLogBox" class="diag-log"></div>
+          </div>
+          <div class="list-box" style="flex-direction:column; align-items:stretch; gap:12px;">
+            <h3>Proxy propio gratis (recomendado si los públicos fallan)</h3>
+            <p style="color:var(--muted); font-size:13px;">1) Entra en <b>workers.cloudflare.com</b> (cuenta gratis) → Create Worker → Deploy. 2) Edit y pega este código → Deploy. 3) Copia la URL de tu worker, añade <code>?url=</code> al final y pégala en Ajustes ▸ Proxy propio.</p>
+            <pre id="workerCode" class="diag-log" style="max-height:180px;">addEventListener('fetch', e =&gt; e.respondWith((async () =&gt; {
+  const u = new URL(e.request.url), t = u.searchParams.get('url');
+  if (!t) return new Response('falta ?url=', { status: 400 });
+  const h = new Headers(e.request.headers);
+  h.delete('origin'); h.delete('referer'); h.delete('cookie');
+  const r = await fetch(t, { method: e.request.method, headers: h,
+    body: ['GET','HEAD'].includes(e.request.method) ? undefined : e.request.body });
+  const out = new Response(r.body, r);
+  out.headers.set('Access-Control-Allow-Origin', '*');
+  return out;
+})()));</pre>
+            <div class="btn-group">
+              <button id="copyWorkerBtn" class="action-btn secondary small focusable">📋 Copiar código del worker</button>
+            </div>
+          </div>
+        `;
+        viewContent.appendChild(wrap);
+        const box = document.getElementById("diagLogBox");
+        if (!state.diagLog.length) {
+          box.innerHTML = "<div style='color:var(--muted)'>Registro vacío. Pulsa ▶ Probar CineHD Plus o usa la app y vuelve aquí.</div>";
+        } else {
+          state.diagLog.forEach(l => {
+            const line = document.createElement("div");
+            line.textContent = `${l.t} [${l.kind}] ${l.msg}`;
+            box.appendChild(line);
+          });
+          box.scrollTop = box.scrollHeight;
+        }
+        document.getElementById("diagClearBtn").addEventListener("click", () => {
+          state.diagLog = [];
+          renderView();
+        });
+        document.getElementById("diagCopyBtn").addEventListener("click", () => {
+          if (!state.diagLog.length) { setStatus("El registro está vacío"); return; }
+          const txt = state.diagLog.map(l => `${l.t} [${l.kind}] ${l.msg}`).join("\n");
+          copyTextToClipboard(txt, "✓ Registro copiado al portapapeles");
+        });
+        document.getElementById("copyWorkerBtn").addEventListener("click", () => {
+          copyTextToClipboard(document.getElementById("workerCode").textContent, "Código del worker copiado");
+        });
+        document.getElementById("diagRunBtn").addEventListener("click", () => runCinehdPlusDiagnostic());
+      }
+    }
+
+    // =========================================================================
+    // 7. DIAGNÓSTICO GUIADO DEL PLUGIN XUPER (CINEHD PLUS)
+    // =========================================================================
+    async function runCinehdPlusDiagnostic() {
+      const entry = { id: "cinehdplus", name: "CineHD Plus", address: "xuper-plugin/kino-plugin-cinehdplus", stremio: null, enabled: true };
+      diagLog("test", "════════ PRUEBA CINEHD PLUS (xuper) ════════");
+      setStatus("Ejecutando diagnóstico de CineHD Plus…");
+      try {
+        diagLog("test", "Paso 1/4: descargando manifiesto y código del plugin desde GitHub…");
+        const mod = await withTimeout(loadGitHubPlugin(entry), 40000, "carga del plugin");
+        diagLog("test", `✓ Plugin cargado: ${mod.manifest.name} v${mod.manifest.version} (apiVersion ${mod.manifest.apiVersion}), exports: ${Object.keys(mod.exports).join(", ")}`);
+
+        diagLog("test", "Paso 2/4: pidiendo home() al plugin (listas de películas/series)…");
+        let rows = null;
+        try {
+          rows = await withTimeout(callPluginFn(entry, "home"), 50000, "home");
+        } catch (e) {
+          diagLog("error", `✗ home() falló: ${e.userMessage || e.message || e}`);
+          diagLog("test", "Si arriba todas las peticiones a cinehdplus.org dicen 'falla CORS/red' o 'sin respuesta', el problema es la RED/proxies, no la app. Prueba el proxy propio (bloque de abajo).");
+          setStatus("Diagnóstico: falla la conexión con cinehdplus.org");
+          return;
+        }
+        const rowCount = Array.isArray(rows) ? rows.length : 0;
+        if (!rowCount) {
+          diagLog("error", "✗ home() no devolvió filas. Si arriba todas las peticiones a cinehdplus.org dicen 'sin respuesta' o 'bloqueada', el problema es la RED/proxies, no la app. Prueba el proxy propio (bloque de abajo).");
+          setStatus("Diagnóstico: falla la conexión con cinehdplus.org");
+          return;
+        }
+        diagLog("test", `✓ home() OK: ${rowCount} filas`);
+        const first = rows[0] && rows[0].items && rows[0].items[0];
+        if (!first || !first.ref) {
+          diagLog("error", "✗ La primera fila no trae ítems con ref — inesperado, repórtalo.");
+          return;
+        }
+        diagLog("test", `Paso 3/4: resolviendo "${first.title}" (ref ${first.ref}) — esto prueba la cadena de servidores…`);
+        let stream = null;
+        try {
+          stream = await withTimeout(callPluginFn(entry, "resolve", first.ref), 70000, "resolve");
+        } catch (e) {
+          diagLog("error", `✗ resolve() falló: ${e.code || ""} ${e.userMessage || e.message}`);
+          diagLog("test", "Revisa las líneas [cinehdplus] de arriba: dicen qué servidor falló y por qué. Si todas las rutas a api.cinehdplus.org fallan, es la red/proxies.");
+          setStatus("Diagnóstico: resolve falló — mira el registro");
+          return;
+        }
+        if (stream && stream.url) {
+          let host = stream.url;
+          try { host = new URL(stream.url).host; } catch (_) {}
+          diagLog("test", `✓ resolve() OK: servidor en ${host} (${stream.label || "principal"})${stream.alternatives ? " + " + stream.alternatives.length + " alternativas" : ""}`);
+          diagLog("test", "Paso 4/4: probando alcance del CDN del video…");
+          try {
+            await probeMediaNoCors(stream.url, 8000);
+            diagLog("test", `✓ El CDN ${host} responde desde este aparato. La película debería reproducir.`);
+          } catch (_) {
+            diagLog("error", `✗ El CDN ${host} NO responde directo. Prueba el botón 🔁 vía Proxy o 🟡 Nativo VIDAA al reproducir.`);
+          }
+          diagLog("test", "════════ RESULTADO: PLUGIN OPERATIVO ════════");
+          setStatus("Diagnóstico: CineHD Plus operativo");
+        } else {
+          diagLog("error", "✗ resolve() respondió sin URL — repórtalo con este registro.");
+        }
+      } catch (e) {
+        diagLog("error", `✗ El diagnóstico se detuvo: ${e.userMessage || e.message || e}`);
+        setStatus("Diagnóstico detenido — mira el registro");
+      }
+    }
+
+    // =========================================================================
+    // 6. FICHA DE DETALLE, EPISODIOS, RESOLUCIÓN DE STREAMS Y REPRODUCTOR
+    // =========================================================================
+    function renderStreamOptions(streams, title) {
+      const streamsList = document.getElementById("streamsList");
+      streamsList.innerHTML = "";
+      if (!streams.length) {
+        streamsList.innerHTML = "<div style='color:var(--muted); font-size:14px;'>No se devolvieron enlaces directos para esta opción. Prueba con '🔎 Buscar Streams en Plugins'.</div>";
+        return;
+      }
+      streams.forEach((s, i) => {
+        const row = document.createElement("div");
+        row.className = "stream-item focusable";
+        row.tabIndex = 0;
+
+        // Servidor alterno diferido (contrato Kino `alternatives`): se resuelve al elegirlo
+        if (s.lazyRef) {
+          row.innerHTML = `
+            <div>
+              <strong>🎞️ ${s.label || ("Servidor " + (i + 1))}</strong>
+              <div style="font-size:12px; color:var(--muted);">Toca para abrir este servidor</div>
+            </div>
+            <div class="btn-group">
+              <button class="action-btn small focusable" data-open-lazy="${i}">▶ Abrir</button>
+            </div>
+          `;
+          const openLazy = e => {
+            if (e) e.stopPropagation();
+            resolvePluginRef(s.lazyPluginId, s.lazyRef, title);
+          };
+          row.querySelector("[data-open-lazy]").addEventListener("click", openLazy);
+          row.addEventListener("click", openLazy);
+          streamsList.appendChild(row);
+          return;
+        }
+
+        row.innerHTML = `
+          <div>
+            <strong>🎬 ${s.label || ("Servidor " + (i + 1))}</strong>
+            <div style="font-size:12px; color:var(--muted); max-width:650px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${s.url}</div>
+          </div>
+          <div class="btn-group">
+            <button class="action-btn small focusable" data-play-web="${i}">▶ Web</button>
+            <button class="action-btn secondary small focusable" data-play-proxy="${i}">🔁 vía Proxy</button>
+            <button class="action-btn secondary small focusable" data-play-native="${i}">🟡 Nativo VIDAA</button>
+          </div>
+        `;
+        row.querySelector("[data-play-web]").addEventListener("click", e => {
+          e.stopPropagation();
+          startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { mime: s.mime });
+        });
+        row.querySelector("[data-play-proxy]").addEventListener("click", e => {
+          e.stopPropagation();
+          startPlayback(proxiedPlaybackUrl(s.url), `${title} (${s.label || 'Stream'})`, { viaProxy: true, mime: s.mime });
+        });
+        row.querySelector("[data-play-native]").addEventListener("click", e => {
+          e.stopPropagation();
+          handoffToVidaaNativePlayer(s.url, title);
+        });
+        row.addEventListener("click", () => startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { mime: s.mime }));
+        streamsList.appendChild(row);
+      });
+    }
+
+    async function resolvePluginRef(pluginId, ref, title) {
+      const inst = state.installed.find(x => x.id === pluginId);
+      if (!inst) return [];
+      setStatus(`Resolviendo enlaces desde ${inst.name}...`);
+      try {
+        // resolve() puede tardar ~60 s probando servidores (límite propio del plugin)
+        const res = await withTimeout(callPluginFn(inst, "resolve", ref), 65000, inst.name);
+        if (!res) return [];
+        const list = [];
+        if (res.url) list.push({ url: res.url, label: `${inst.name} · ${res.label || 'Principal'}`, mime: res.mime, headers: res.headers });
+        if (Array.isArray(res.copies)) {
+          res.copies.forEach(c => {
+            if (c && c.url) list.push({ url: c.url, label: `${inst.name} · ${c.label || 'Servidor'}`, mime: c.mime, headers: c.headers });
+          });
+        }
+        // Contrato Kino: `alternatives` son refs diferidas (c:...@n) que se resuelven al elegirlas
+        if (Array.isArray(res.alternatives)) {
+          res.alternatives.forEach(a => {
+            if (a && a.ref) list.push({ lazyRef: a.ref, lazyPluginId: pluginId, label: `${inst.name} · ${a.label || 'Servidor alterno'}` });
+          });
+        }
+        setStatus(list.length ? `${list.length} opciones de servidor` : "Sin enlaces directos");
+        renderStreamOptions(list, title);
+        return list;
+      } catch (e) {
+        setStatus(`Error al resolver en ${inst.name}: ${e.userMessage || e.message || e}`);
+        const streamsList = document.getElementById("streamsList");
+        if (streamsList && document.getElementById("detailOverlay").classList.contains("open")) {
+          const hint = e.code === "unavailable"
+            ? "<br><br>El sitio está protegido (Cloudflare) o los proxies no responden: revisa Ajustes ▸ 📡 Probar Conexión."
+            : "";
+          streamsList.innerHTML = `<div style='color:var(--muted); font-size:14px;'>${e.userMessage || e.message || "No se pudo resolver."}${hint}</div>`;
+        }
+        return [];
+      }
+    }
+
+    async function openDetail(item) {
+      state.selectedItem = item;
+      const fallbackImg = "https://avatars.githubusercontent.com/u/332969319?s=200&v=4";
+      document.getElementById("detailPoster").src = item.poster || fallbackImg;
+      document.getElementById("detailTitle").textContent = item.title;
+      document.getElementById("detailMeta").textContent = `${item.year || ''} · Fuente: ${item.source || 'Kino'}`;
+      document.getElementById("detailDesc").textContent = item.synopsis || "Cargando detalles...";
+      document.getElementById("episodesSection").innerHTML = "";
+      document.getElementById("streamsList").innerHTML = "";
+      document.getElementById("detailOverlay").classList.add("open");
+      document.getElementById("playDirectBtn").focus();
+
+      // Vía sin proxy: si el título trae ID de IMDb (Cinemeta) se arman los
+      // servidores embed de inmediato — no hay que resolver nada por la red.
+      state.selectedSeason = 1;
+      state.selectedEpisode = 1;
+      state.activeSources = [];
+      if (item.video) {
+        state.activeSources.push({ name: "Servidor Directo MP4 (sin publicidad)", badge: "Directo MP4", type: "direct", url: item.video });
+      }
+      const imdb = item.imdbId || (item.rawId && /^tt\d+/.test(item.rawId) ? item.rawId : "");
+      if (imdb) {
+        state.activeSources.push(...getSourcesForTitle(imdb, item.title, item.kind === "series", 1, 1));
+      }
+      if (state.activeSources.length) renderEmbedSources(item);
+      if (item.kind === "series" && imdb && !item.stremioBase) loadCinemetaEpisodes(item, imdb);
+
+      const inst = state.installed.find(x => x.id === item.pluginId);
+      // 1. Si viene de un plugin de GitHub, pedir details(ref) y episodes(ref)
+      if (inst && inst.address && item.ref) {
+        try {
+          const det = await withTimeout(callPluginFn(inst, "details", item.ref), 30000, inst.name);
+          if (det) {
+            if (det.overview || det.synopsis) document.getElementById("detailDesc").textContent = det.overview || det.synopsis;
+            if (det.year) document.getElementById("detailMeta").textContent = `${det.year} · Fuente: ${inst.name}`;
+          }
+        } catch (_) {}
+
+        try {
+          const epRes = await withTimeout(callPluginFn(inst, "episodes", item.ref), 30000, inst.name);
+          const eps = Array.isArray(epRes) ? epRes : (epRes && Array.isArray(epRes.episodes) ? epRes.episodes : []);
+          // El contrato Kino devuelve la ficha de la serie junto a los episodios
+          if (epRes && epRes.series) {
+            if (epRes.series.overview) document.getElementById("detailDesc").textContent = epRes.series.overview;
+            if (epRes.series.poster) document.getElementById("detailPoster").src = epRes.series.poster;
+            if (epRes.series.year) document.getElementById("detailMeta").textContent = `${epRes.series.year} · Fuente: ${inst.name}`;
+          }
+          if (eps.length) {
+            const epSec = document.getElementById("episodesSection");
+            epSec.innerHTML = `<h3 style="font-size:17px; margin-bottom:8px;">Capítulos / Archivos (${eps.length})</h3><div class="episodes-grid" id="epGrid"></div>`;
+            const epGrid = document.getElementById("epGrid");
+            eps.slice(0, 120).forEach(ep => {
+              const b = document.createElement("button");
+              b.className = "ep-btn focusable";
+              const epLabel = (ep.season ? `T${ep.season}:` : "") + `E${ep.number || ep.episode || 1} - ${ep.title || ep.name || "Capítulo"}`;
+              b.textContent = epLabel;
+              b.addEventListener("click", () => resolvePluginRef(inst.id, ep.ref || ep.id, `${item.title} ${epLabel}`));
+              epGrid.appendChild(b);
+            });
+          }
+        } catch (e) {
+          // p. ej. series sin episodios: el plugin manda userMessage en español
+          if (e && e.userMessage) {
+            document.getElementById("episodesSection").innerHTML = `<div style="color:var(--muted); font-size:14px; margin-top:8px;">${e.userMessage}</div>`;
+          }
+        }
+      }
+
+      // 2. Si viene de un addon Stremio, pedir /meta/{type}/{id}.json
+      if (item.stremioBase && item.rawId) {
+        try {
+          const metaUrl = `${item.stremioBase}/meta/${encodeURIComponent(item.stremioType)}/${encodeURIComponent(item.rawId)}.json`;
+          const r = await smartFetch(metaUrl);
+          if (r.ok) {
+            const m = JSON.parse(r.text).meta;
+            if (m) {
+              if (m.description) document.getElementById("detailDesc").textContent = m.description;
+              if (Array.isArray(m.videos) && m.videos.length > 1) {
+                const epSec = document.getElementById("episodesSection");
+                epSec.innerHTML = `<h3 style="font-size:17px; margin-bottom:8px;">Episodios (${m.videos.length})</h3><div class="episodes-grid" id="epGrid"></div>`;
+                const epGrid = document.getElementById("epGrid");
+                m.videos.slice(0, 100).forEach(v => {
+                  const b = document.createElement("button");
+                  b.className = "ep-btn focusable";
+                  const label = `T${v.season || 1}:E${v.episode || v.number || 1} · ${v.name || v.title || "Episodio"}`;
+                  b.textContent = label;
+                  b.addEventListener("click", () => searchStreamsAcrossPlugins(item.title, v.season, v.episode));
+                  epGrid.appendChild(b);
+                });
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    // Busca streams para el título actual en todos los plugins de video instalados (útil cuando el catálogo viene de Cinemeta/TMDB)
+    async function searchStreamsAcrossPlugins(title, season, episode) {
+      setStatus(`Buscando servidores para "${title}" en tus plugins...`);
+      const foundStreams = [];
+      const failures = [];
+      for (const inst of state.installed) {
+        if (!inst.address || inst.enabled === false) continue;
+        try {
+          let sRes = null;
+          try {
+            sRes = await withTimeout(callPluginFn(inst, "search", { q: title, query: title, type: season ? "series" : "movie", originalTitle: title, altTitles: [] }), 30000, inst.name);
+          } catch (_) {
+            try { sRes = await withTimeout(callPluginFn(inst, "search", title), 20000, inst.name); } catch (_) {}
+          }
+          const items = Array.isArray(sRes) ? sRes : (sRes && Array.isArray(sRes.items) ? sRes.items : []);
+          if (!items.length) { failures.push(`${inst.name}: sin coincidencias`); continue; }
+          // Prueba hasta 3 coincidencias: la primera no siempre es el título correcto
+          let resolvedAny = false;
+          let lastErr = null;
+          for (const match of items.slice(0, 3)) {
+            const targetRef = match.ref || match.id;
+            if (!targetRef) continue;
+            try {
+              const resolved = await withTimeout(callPluginFn(inst, "resolve", targetRef), 65000, inst.name);
+              if (resolved && resolved.url) {
+                foundStreams.push({ url: resolved.url, label: `${inst.name} · ${resolved.label || match.title || 'Principal'}`, mime: resolved.mime, headers: resolved.headers });
+                resolvedAny = true;
+              }
+              if (resolved && Array.isArray(resolved.copies)) {
+                resolved.copies.forEach(c => {
+                  if (c && c.url) { foundStreams.push({ url: c.url, label: `${inst.name} · ${c.label || 'Opción'}`, mime: c.mime, headers: c.headers }); resolvedAny = true; }
+                });
+              }
+              if (resolved && Array.isArray(resolved.alternatives)) {
+                resolved.alternatives.forEach(a => {
+                  if (a && a.ref) { foundStreams.push({ lazyRef: a.ref, lazyPluginId: inst.id, label: `${inst.name} · ${a.label || 'Servidor alterno'}` }); resolvedAny = true; }
+                });
+              }
+              if (resolvedAny) break;
+            } catch (e) {
+              lastErr = e;
+            }
+          }
+          if (!resolvedAny) failures.push(`${inst.name}: ${(lastErr && (lastErr.userMessage || lastErr.message)) || "sin enlaces"}`);
+        } catch (e) {
+          failures.push(`${inst.name}: ${(e && (e.userMessage || e.message)) || "error"}`);
+        }
+      }
+      renderStreamOptions(foundStreams, title);
+      if (!foundStreams.length && failures.length) {
+        const streamsList = document.getElementById("streamsList");
+        streamsList.innerHTML = `<div style='color:var(--muted); font-size:14px; line-height:1.8;'>Ningún plugin abrió enlaces:<br>${failures.map(f => `• ${f}`).join("<br>")}<br><br>Si todo dice "no está disponible", revisa Ajustes ▸ 📡 Probar Conexión.</div>`;
+      }
+      setStatus(foundStreams.length ? `Se encontraron ${foundStreams.length} enlaces` : "Ningún plugin abrió enlaces para este título");
+    }
+
+    // URL de reproducción a través del proxy CORS (para CDNs que no envían
+    // cabeceras CORS, que hls.js necesita, o que bloquean al WebView)
+    function proxiedPlaybackUrl(url) {
+      const prefix = state.lastGoodProxy || state.customProxy || "https://api.codetabs.com/v1/proxy?quest=";
+      return prefix + encodeURIComponent(url);
+    }
+
+    // Reproduce una "fuente" de la ficha (embed en iframe o URL directa en <video>)
+    function startPlaybackSource(src, title) {
+      if (!src) { setStatus("No hay un servidor seleccionado para reproducir"); return; }
+      if (src.type === "embed") startEmbedPlayback(src, title);
+      else startPlayback(src.url, title, { mime: src.mime });
+    }
+
+    // Servidor web embed: va en <iframe>, que no necesita CORS. La página del
+    // servidor trae su propio reproductor (y su publicidad).
+    function startEmbedPlayback(src, title) {
+      state.activeVideoUrl = src.url;
+      document.getElementById("nowPlayingTitle").textContent = `${title || "Reproduciendo"} — ${src.name}`;
+      document.getElementById("nowPlayingSub").textContent = "Servidor web con su propia publicidad. Si no carga o se trabó: 🔄 Siguiente Servidor · Back/Esc: Salir";
+      document.getElementById("playerOverlay").classList.add("open");
+      const video = document.getElementById("videoPlayer");
+      const iframe = document.getElementById("webPlayerFrame");
+      if (state.hlsInstance) { state.hlsInstance.destroy(); state.hlsInstance = null; }
+      video.pause();
+      video.removeAttribute("src");
+      video.style.display = "none";
+      iframe.style.display = "block";
+      iframe.src = src.url;
+      document.getElementById("closePlayerBtn").focus();
+    }
+
+    function startPlayback(url, title, opts = {}) {
+      if (!url) { setStatus("No hay URL de stream disponible"); return; }
+      if (!opts.viaProxy) state.activeVideoUrl = url; // conserva la URL original para el pase a nativo
+      document.getElementById("nowPlayingTitle").textContent = title || "Reproduciendo";
+      document.getElementById("nowPlayingSub").textContent = opts.viaProxy
+        ? "Reproduciendo vía proxy CORS · Back/Esc: Salir"
+        : "Botón Amarillo: Pasar a reproductor nativo VIDAA · Back/Esc: Salir";
+      document.getElementById("playerOverlay").classList.add("open");
+      const video = document.getElementById("videoPlayer");
+      const iframe = document.getElementById("webPlayerFrame");
+      iframe.src = "about:blank";
+      iframe.style.display = "none";
+      video.style.display = "";
+      // Sin crossOrigin: <video> reproduce orígenes cruzados sin CORS; solo hls.js lo necesita
+      if (state.hlsInstance) { state.hlsInstance.destroy(); state.hlsInstance = null; }
+
+      const isHls = /\.m3u8(\?|#|$)/i.test(url) || /mpegurl/i.test(opts.mime || "");
+      let retried = !!opts.viaProxy;
+
+      const retryViaProxy = () => {
+        if (retried) {
+          setStatus("No se pudo reproducir ni directo ni vía proxy — prueba 🟡 Nativo VIDAA");
+          return;
+        }
+        retried = true;
+        setStatus("El servidor no respondió directo; reintentando vía proxy…");
+        startPlayback(proxiedPlaybackUrl(url), title, { viaProxy: true, mime: opts.mime });
+      };
+
+      video.onerror = () => { retryViaProxy(); };
+
+      if (isHls && window.Hls && Hls.isSupported()) {
+        const hls = new Hls({ manifestLoadingTimeOut: 20000, fragLoadingTimeOut: 20000 });
+        hls.loadSource(url);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          if (data && data.fatal) retryViaProxy();
+        });
+        state.hlsInstance = hls;
+      } else {
+        video.src = url;
+        video.play().catch(() => {});
+      }
+      document.getElementById("closePlayerBtn").focus();
+    }
+
+    function handoffToVidaaNativePlayer(url, title) {
+      if (!url) return;
+      try {
+        if (window.omi_platform && typeof window.omi_platform.sendPlatformMessage === "function") {
+          window.omi_platform.sendPlatformMessage(JSON.stringify({
+            type: "launch_media_player",
+            url: url,
+            title: title || "Kino TV"
+          }));
+          setStatus("Enviado al reproductor nativo de VIDAA OS");
+          return;
+        }
+      } catch (e) {}
+      window.open(url, "_blank");
+    }
+
+    // Eventos de botones de modales
+    document.getElementById("playDirectBtn").addEventListener("click", async () => {
+      const it = state.selectedItem;
+      if (!it) return;
+      // Si la ficha ya armó servidores (embed por IMDb o MP4 directo), reproducir el primero
+      if (state.activeSources.length) {
+        state.currentSourceIndex = 0;
+        startPlaybackSource(state.activeSources[0], it.title);
+        return;
+      }
+      if (it.video) {
+        startPlayback(it.video, it.title);
+        return;
+      }
+      if (it.pluginId && it.ref && !it.stremioBase) {
+        const list = await resolvePluginRef(it.pluginId, it.ref, it.title);
+        if (list.length === 1) startPlayback(list[0].url, it.title);
+        return;
+      }
+      await searchStreamsAcrossPlugins(it.title);
+    });
+
+    document.getElementById("searchAllPluginsBtn").addEventListener("click", () => {
+      if (state.selectedItem) searchStreamsAcrossPlugins(state.selectedItem.title);
+    });
+
+    document.getElementById("playNativeBtn").addEventListener("click", () => {
+      if (state.selectedItem && state.selectedItem.video) {
+        handoffToVidaaNativePlayer(state.selectedItem.video, state.selectedItem.title);
+      } else if (state.activeVideoUrl) {
+        handoffToVidaaNativePlayer(state.activeVideoUrl, state.selectedItem ? state.selectedItem.title : "Kino TV");
+      }
+    });
+
+    document.getElementById("playerNativeHandoffBtn").addEventListener("click", () => {
+      handoffToVidaaNativePlayer(state.activeVideoUrl, document.getElementById("nowPlayingTitle").textContent);
+    });
+
+    document.getElementById("favToggleBtn").addEventListener("click", () => {
+      if (!state.selectedItem) return;
+      const idx = state.favorites.findIndex(f => f.id === state.selectedItem.id);
+      if (idx >= 0) { state.favorites.splice(idx, 1); setStatus("Eliminado de Favoritos"); }
+      else { state.favorites.push(state.selectedItem); setStatus("Guardado en Favoritos ❤️"); }
+      saveStore("kino_favs_v2", state.favorites);
+    });
+
+    document.getElementById("closeDetailBtn").addEventListener("click", () => {
+      document.getElementById("detailOverlay").classList.remove("open");
+    });
+
+    document.getElementById("saveConfigBtn").addEventListener("click", async () => {
+      const p = state.configuringPlugin;
+      if (p) {
+        state.pluginConfigs[p.id] = state.pluginConfigs[p.id] || {};
+        document.querySelectorAll("#configFieldsBox [data-cfg-key]").forEach(inp => {
+          state.pluginConfigs[p.id][inp.dataset.cfgKey] = inp.value.trim();
+        });
+        saveStore("kino_plugin_configs", state.pluginConfigs);
+        delete state.loadedModules[p.id];
+        setStatus(`Configuración guardada para ${p.name}`);
+      }
+      document.getElementById("configOverlay").classList.remove("open");
+      await refreshHomeCatalog();
+    });
+
+    document.getElementById("closeConfigBtn").addEventListener("click", () => {
+      document.getElementById("configOverlay").classList.remove("open");
+    });
+
+    document.getElementById("closePlayerBtn").addEventListener("click", () => {
+      const video = document.getElementById("videoPlayer");
+      const iframe = document.getElementById("webPlayerFrame");
+      video.pause();
+      video.src = "";
+      video.style.display = "";
+      iframe.src = "about:blank";
+      iframe.style.display = "none";
+      if (state.hlsInstance) { state.hlsInstance.destroy(); state.hlsInstance = null; }
+      document.getElementById("playerOverlay").classList.remove("open");
+    });
+
+    // Cicla por los servidores de la ficha (embed o directos) sin salir del player
+    document.getElementById("playerNextServerBtn").addEventListener("click", () => {
+      if (!state.activeSources.length) { setStatus("No hay más servidores en la lista"); return; }
+      state.currentSourceIndex = (state.currentSourceIndex + 1) % state.activeSources.length;
+      const src = state.activeSources[state.currentSourceIndex];
+      setStatus(`Probando ${src.name}…`);
+      startPlaybackSource(src, state.selectedItem ? state.selectedItem.title : "Kino TV");
+    });
+
+    document.getElementById("exitAppBtn").addEventListener("click", () => {
+      if (typeof window.Hisense_Exit === "function") window.Hisense_Exit();
+      else window.close();
+    });
+
+    document.querySelectorAll(".nav-btn[data-view]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        state.view = btn.dataset.view;
+        renderView();
+      });
+    });
+
+    // Navegación espacial con el control remoto de VIDAA OS (Flechas + OK + Back + Amarillo)
+    window.addEventListener("keydown", e => {
+      if (e.key === "Escape" || e.key === "Backspace" || e.keyCode === 461 || e.keyCode === 8) {
+        const activeTag = document.activeElement && document.activeElement.tagName;
+        if (activeTag === "INPUT" && e.key === "Backspace") return;
+        if (document.getElementById("playerOverlay").classList.contains("open")) {
+          e.preventDefault();
+          document.getElementById("closePlayerBtn").click();
+          return;
+        }
+        if (document.getElementById("configOverlay").classList.contains("open")) {
+          e.preventDefault();
+          document.getElementById("closeConfigBtn").click();
+          return;
+        }
+        if (document.getElementById("detailOverlay").classList.contains("open")) {
+          e.preventDefault();
+          document.getElementById("closeDetailBtn").click();
+          return;
+        }
+      }
+      if (e.keyCode === 405 && state.activeVideoUrl) {
+        handoffToVidaaNativePlayer(state.activeVideoUrl, "Kino TV");
+      }
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
+        const focusables = Array.from(document.querySelectorAll(".focusable")).filter(el => el.offsetParent !== null);
+        if (!focusables.length) return;
+        const current = document.activeElement;
+        const idx = focusables.indexOf(current);
+        if (idx === -1) { focusables[0].focus(); return; }
+        const rect = current.getBoundingClientRect();
+        let best = null, bestDist = Infinity;
+        focusables.forEach(cand => {
+          if (cand === current) return;
+          const r = cand.getBoundingClientRect();
+          const dx = (r.left + r.width / 2) - (rect.left + rect.width / 2);
+          const dy = (r.top + r.height / 2) - (rect.top + rect.height / 2);
+          if (e.key === "ArrowRight" && dx <= 10) return;
+          if (e.key === "ArrowLeft" && dx >= -10) return;
+          if (e.key === "ArrowDown" && dy <= 10) return;
+          if (e.key === "ArrowUp" && dy >= -10) return;
+          const dist = Math.hypot(dx, dy);
+          if (dist < bestDist) { bestDist = dist; best = cand; }
+        });
+        if (best) {
+          e.preventDefault();
+          best.focus();
+          best.scrollIntoView({ block: "nearest", inline: "nearest" });
+        }
+      }
+    });
+
+    // Inicialización
+    renderView();
+    document.getElementById("navHome").focus();
+    refreshHomeCatalog();
+  </script>
+</body>
+</html>
