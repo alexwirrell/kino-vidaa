@@ -1100,86 +1100,154 @@
     }
 
     // Carga y compila un plugin de GitHub (`kino-plugin.json` + `plugin.js`)
-    async function loadGitHubPlugin(pluginEntry) {
+    // Promesas en curso: si Inicio, la ficha y Configurar piden el mismo plugin
+    // a la vez, se descarga y compila UNA sola vez (antes se compilaba en paralelo
+    // y cada copia quedaba con su propio estado).
+    const pluginLoadsInFlight = {};
+    function loadGitHubPlugin(pluginEntry) {
       const id = pluginEntry.id;
-      if (state.loadedModules[id]) return state.loadedModules[id];
-      const repo = pluginEntry.address;
-      if (!repo) return null;
+      if (state.loadedModules[id]) return Promise.resolve(state.loadedModules[id]);
+      if (!pluginEntry.address) return Promise.resolve(null);
+      if (!pluginLoadsInFlight[id]) {
+        pluginLoadsInFlight[id] = loadGitHubPluginNow(pluginEntry)
+          .finally(() => { delete pluginLoadsInFlight[id]; });
+      }
+      return pluginLoadsInFlight[id];
+    }
 
-      const manifestUrls = [
-        `https://raw.githubusercontent.com/${repo}/HEAD/kino-plugin.json`,
-        `https://raw.githubusercontent.com/${repo}/main/kino-plugin.json`,
-        `https://raw.githubusercontent.com/${repo}/master/kino-plugin.json`,
-        `https://cdn.jsdelivr.net/gh/${repo}@main/kino-plugin.json`
+    // Quita el BOM UTF-8 que algunos editores de Windows dejan al inicio y que
+    // hace fallar JSON.parse (el plugin "no se instalaba" sin razón aparente).
+    function stripBom(text) {
+      return String(text || "").replace(/^﻿/, "");
+    }
+
+    async function loadGitHubPluginNow(pluginEntry) {
+      const id = pluginEntry.id;
+      const repo = String(pluginEntry.address).replace(/^\/+|\/+$/g, "");
+
+      // Cada candidato recuerda su rama para bajar el código del MISMO sitio que el manifiesto
+      const sources = [
+        { ref: "HEAD", base: `https://raw.githubusercontent.com/${repo}/HEAD/` },
+        { ref: "main", base: `https://raw.githubusercontent.com/${repo}/main/` },
+        { ref: "master", base: `https://raw.githubusercontent.com/${repo}/master/` },
+        { ref: "", base: `https://cdn.jsdelivr.net/gh/${repo}/` },
+        { ref: "main", base: `https://cdn.jsdelivr.net/gh/${repo}@main/` },
+        { ref: "master", base: `https://cdn.jsdelivr.net/gh/${repo}@master/` }
       ];
       let manifest = null;
-      for (const u of manifestUrls) {
+      let source = null;
+      let lastManifestErr = "";
+      for (const src of sources) {
         try {
-          const r = await smartFetch(u);
-          if (r.ok) { manifest = JSON.parse(r.text); break; }
-        } catch (_) {}
+          const r = await smartFetch(src.base + "kino-plugin.json");
+          if (!r.ok) { lastManifestErr = `HTTP ${r.status}`; continue; }
+          const parsed = JSON.parse(stripBom(r.text));
+          if (!parsed || typeof parsed !== "object") { lastManifestErr = "manifiesto vacío"; continue; }
+          manifest = parsed;
+          source = src;
+          break;
+        } catch (e) {
+          lastManifestErr = e instanceof SyntaxError ? "kino-plugin.json no es JSON válido" : "sin conexión";
+        }
       }
-      if (!manifest) throw new Error(`No se pudo descargar kino-plugin.json de ${repo}`);
+      if (!manifest) {
+        throw new Error(`No se pudo descargar kino-plugin.json de ${repo} (${lastManifestErr || "sin respuesta"}). ¿El repositorio existe y es público?`);
+      }
 
-      // Inicializar valores por defecto de configuración del manifiesto
+      // Inicializar (y guardar) los valores por defecto de configuración del manifiesto
       if (Array.isArray(manifest.settings)) {
         state.pluginConfigs[id] = state.pluginConfigs[id] || {};
+        let changed = false;
         manifest.settings.forEach(s => {
           if (s && s.key && state.pluginConfigs[id][s.key] === undefined && s.default !== undefined) {
             state.pluginConfigs[id][s.key] = s.default;
+            changed = true;
           }
         });
+        if (changed) saveStore("kino_plugin_configs", state.pluginConfigs);
       }
 
-      const entryFile = (manifest.entry || "plugin.js").replace(/^\.\//, "");
-      const codeUrls = [
-        `https://raw.githubusercontent.com/${repo}/HEAD/${entryFile}`,
-        `https://raw.githubusercontent.com/${repo}/main/${entryFile}`,
-        `https://raw.githubusercontent.com/${repo}/master/${entryFile}`,
-        `https://cdn.jsdelivr.net/gh/${repo}@main/${entryFile}`
-      ];
+      const entryFile = String(manifest.entry || manifest.main || "plugin.js").replace(/^\.?\//, "");
+      // Primero la misma rama donde estaba el manifiesto, luego las demás
+      const codeSources = [source].concat(sources.filter(s => s !== source));
       let code = null;
-      for (const u of codeUrls) {
+      let lastCodeErr = "";
+      for (const src of codeSources) {
         try {
-          const r = await smartFetch(u);
-          if (r.ok && r.text) { code = r.text; break; }
-        } catch (_) {}
+          const r = await smartFetch(src.base + entryFile);
+          if (r.ok && r.text && !/^\s*</.test(r.text)) { code = stripBom(r.text); break; }
+          lastCodeErr = r.ok ? "respuesta vacía o HTML" : `HTTP ${r.status}`;
+        } catch (_) { lastCodeErr = "sin conexión"; }
       }
-      if (!code) throw new Error(`No se pudo descargar ${entryFile} de ${repo}`);
+      if (!code) throw new Error(`No se pudo descargar ${entryFile} de ${repo} (${lastCodeErr || "sin respuesta"})`);
 
-      // Inyectar `globalThis.kino` antes de evaluar el módulo
-      globalThis.kino = createKinoEnv(id);
+      // Imports relativos (`import x from "./lib.js"`): desde un blob: no se pueden
+      // resolver, y raw.githubusercontent los sirve como text/plain (el navegador
+      // los rechaza como módulo). Se reescriben a jsDelivr, que sí sirve JS.
+      const jsdBase = `https://cdn.jsdelivr.net/gh/${repo}${source.ref && source.ref !== "HEAD" ? "@" + source.ref : ""}/`;
+      const entryDir = entryFile.includes("/") ? entryFile.slice(0, entryFile.lastIndexOf("/") + 1) : "";
+      const absolutize = spec => { try { return new URL(spec, jsdBase + entryDir).href; } catch (_) { return spec; } };
+      code = code
+        .replace(/(\bimport\s[^'"]*?\bfrom\s*|\bimport\s*|\bexport\s[^'"]*?\bfrom\s*)(['"])(\.{1,2}\/[^'"]+)\2/g,
+          (_, pre, q, spec) => `${pre}${q}${absolutize(spec)}${q}`)
+        .replace(/\bimport\(\s*(['"])(\.{1,2}\/[^'"]+)\1\s*\)/g, (_, q, spec) => `import(${q}${absolutize(spec)}${q})`);
+
+      // Un solo entorno `kino` por plugin: el que ve el módulo al compilarse es el
+      // mismo que se reactiva en cada llamada (storage/config coherentes).
+      const env = createKinoEnv(id);
+      globalThis.kino = env;
+      // No inyectar la declaración si el propio plugin ya declara `kino`
+      const declaresKino = /(^|\n)\s*(?:const|let|var)\s+kino\b/.test(code);
       let modExports = null;
+      let importErr = null;
       try {
-        // No inyectar la declaración si el propio plugin ya declara `kino`
-        const declaresKino = /(^|\n)\s*(?:const|let|var)\s+kino\b/.test(code);
         const wrappedCode = declaresKino ? code : `const kino = globalThis.kino;\n${code}`;
         const blob = new Blob([wrappedCode], { type: "text/javascript" });
         const blobUrl = URL.createObjectURL(blob);
-        modExports = await import(blobUrl);
-        URL.revokeObjectURL(blobUrl);
+        try { modExports = await import(blobUrl); }
+        finally { URL.revokeObjectURL(blobUrl); }
       } catch (err) {
-        // Fallback transformando `export async function` / `export function` / `export { ... }`
-        let transformed = code
-          .replace(/^\s*import\s[^;]*;?\s*$/gm, "") // quita imports estáticos (no soportados en Function)
-          .replace(/export\s+async\s+function\s+([A-Za-z0-9_]+)/g, "exports.$1 = async function $1")
-          .replace(/export\s+function\s+([A-Za-z0-9_]+)/g, "exports.$1 = function $1")
-          .replace(/export\s+const\s+([A-Za-z0-9_]+)\s*=/g, "exports.$1 =")
-          .replace(/export\s+let\s+([A-Za-z0-9_]+)\s*=/g, "exports.$1 =")
-          .replace(/export\s+var\s+([A-Za-z0-9_]+)\s*=/g, "exports.$1 =")
-          .replace(/export\s*\{([^}]+)\}\s*;?/g, (_, list) => {
-            return list.split(",").map(part => {
-              const tokens = part.trim().split(/\s+as\s+/);
-              const local = tokens[0].trim();
-              const exported = (tokens[1] || tokens[0]).trim();
-              return local ? `exports.${exported} = ${local};` : "";
-            }).join("\n");
-          });
-        const fn = new Function("kino", `const exports = {};\n${transformed}\nreturn exports;`);
-        modExports = fn(createKinoEnv(id));
+        importErr = err;
       }
 
-      const record = { manifest, exports: modExports, env: createKinoEnv(id) };
+      if (!modExports) {
+        // Fallback transformando `export async function` / `export function` / `export { ... }`
+        try {
+          let transformed = code
+            .replace(/^\s*import\s[^;]*;?\s*$/gm, "") // quita imports estáticos (no soportados en Function)
+            .replace(/export\s+default\s+/g, "exports.default = ")
+            .replace(/export\s+async\s+function\s+([A-Za-z0-9_$]+)/g, "exports.$1 = async function $1")
+            .replace(/export\s+function\s+([A-Za-z0-9_$]+)/g, "exports.$1 = function $1")
+            .replace(/export\s+const\s+([A-Za-z0-9_$]+)\s*=/g, "exports.$1 =")
+            .replace(/export\s+let\s+([A-Za-z0-9_$]+)\s*=/g, "exports.$1 =")
+            .replace(/export\s+var\s+([A-Za-z0-9_$]+)\s*=/g, "exports.$1 =")
+            .replace(/export\s*\{([^}]+)\}\s*;?/g, (_, list) => {
+              return list.split(",").map(part => {
+                const tokens = part.trim().split(/\s+as\s+/);
+                const local = tokens[0].trim();
+                const exported = (tokens[1] || tokens[0]).trim();
+                return local ? `exports.${exported} = ${local};` : "";
+              }).join("\n");
+            });
+          // Si el plugin declara su propio `kino`, un parámetro con el mismo nombre
+          // daba "Identifier 'kino' has already been declared".
+          const prelude = declaresKino ? "" : "const kino = __kinoEnv;\n";
+          const fn = new Function("__kinoEnv", `const exports = {};\n${prelude}${transformed}\nreturn exports;`);
+          modExports = fn(env);
+        } catch (fallbackErr) {
+          const why = (importErr && importErr.message) || (fallbackErr && fallbackErr.message) || "error desconocido";
+          throw new Error(`El código de ${repo} no se pudo ejecutar en este TV: ${why}`);
+        }
+      }
+
+      // `export default { home, search, ... }` también cuenta
+      if (modExports && modExports.default && typeof modExports.default === "object") {
+        const merged = Object.assign({}, modExports.default);
+        Object.keys(modExports).forEach(k => { if (k !== "default") merged[k] = modExports[k]; });
+        modExports = merged;
+      }
+
+      const record = { manifest, exports: modExports, env };
       state.loadedModules[id] = record;
       return record;
     }
@@ -1399,7 +1467,11 @@
     // =========================================================================
     // 4. CARGA DE INICIO (HOME), CANALES EN VIVO Y BÚSQUEDA MULTIFUENTE
     // =========================================================================
+    let homeRefreshRun = 0;
     async function refreshHomeCatalog() {
+      // Si se instala/desinstala durante una recarga, la recarga vieja (con la
+      // lista anterior) terminaba después y pisaba las filas nuevas.
+      const run = ++homeRefreshRun;
       setStatus("Cargando filas desde tus plugins instalados...");
       const allRows = [];
 
@@ -1412,8 +1484,9 @@
         if (cmSeries.length) allRows.push({ row: "📺 Series Populares (sin proxy)", sourceName: "Cinemeta", items: cmSeries.slice(0, 24) });
       } catch (_) {}
 
-      for (const inst of state.installed) {
-        if (inst.enabled === false) continue;
+      for (const inst of state.installed.slice()) {
+        if (run !== homeRefreshRun) return;
+        if (inst.enabled === false || !isInstalled(inst.id)) continue;
         try {
           if (inst.stremio) {
             const sRows = await withTimeout(fetchStremioAddonHome(inst), 40000, inst.name);
@@ -1444,32 +1517,63 @@
               });
             });
 
-            // Si el plugin también exporta channels(), agregarlos a En Vivo
+            // Canales del plugin para En Vivo: contrato antiguo `channels()` y el
+            // actual de Kino `liveCategories()` + `liveChannels({ categoryId })`
+            // (YojaTV, TV Latam...), que antes se ignoraba y no salía ningún canal.
+            const addChannel = (ch, group) => {
+              if (!ch) return;
+              const name = ch.name || ch.title || "Canal";
+              const url = ch.url || (ch.stream && ch.stream.url) || "";
+              const ref = ch.ref || ch.id || "";
+              // Comparar por el nombre ya normalizado (antes los canales con `title`
+              // se duplicaban en cada recarga del Inicio)
+              const exists = state.liveChannels.some(x => x.pluginId === inst.id && (ref ? x.ref === ref : x.name === name));
+              if (exists) return;
+              state.liveChannels.push({
+                name,
+                group: ch.group || group || inst.name,
+                logo: ch.logo || ch.poster || ch.image || "",
+                url,
+                ref,
+                pluginId: inst.id
+              });
+            };
             try {
               const chRes = await withTimeout(callPluginFn(inst, "channels"), 25000, inst.name);
               const chList = Array.isArray(chRes) ? chRes : (chRes && Array.isArray(chRes.channels) ? chRes.channels : []);
-              if (chList.length) {
-                chList.slice(0, 120).forEach(ch => {
-                  const exists = state.liveChannels.some(x => x.name === ch.name && x.pluginId === inst.id);
-                  if (!exists) {
-                    state.liveChannels.push({
-                      name: ch.name || ch.title || "Canal",
-                      group: ch.group || inst.name,
-                      logo: ch.logo || ch.poster || "",
-                      url: ch.url || "",
-                      ref: ch.ref || ch.id || "",
-                      pluginId: inst.id
-                    });
+              chList.slice(0, 120).forEach(ch => addChannel(ch));
+            } catch (_) {}
+            try {
+              const mod = state.loadedModules[inst.id];
+              if (mod && mod.exports && typeof mod.exports.liveChannels === "function") {
+                let cats = [];
+                if (typeof mod.exports.liveCategories === "function") {
+                  const cRes = await withTimeout(callPluginFn(inst, "liveCategories"), 25000, inst.name);
+                  cats = Array.isArray(cRes) ? cRes : (cRes && Array.isArray(cRes.items) ? cRes.items : []);
+                }
+                if (!cats.length) cats = [{ id: undefined, title: inst.name }];
+                let total = 0;
+                for (const cat of cats.slice(0, 12)) {
+                  if (total >= 300 || run !== homeRefreshRun) break;
+                  let cursor;
+                  for (let page = 0; page < 5 && total < 300; page++) {
+                    const lRes = await withTimeout(callPluginFn(inst, "liveChannels", { categoryId: cat.id, cursor }), 25000, inst.name);
+                    const items = Array.isArray(lRes) ? lRes : (lRes && Array.isArray(lRes.items) ? lRes.items : []);
+                    items.forEach(ch => { addChannel(ch, cat.title || cat.name); total++; });
+                    cursor = lRes && lRes.next;
+                    if (!cursor || !items.length) break;
                   }
-                });
+                }
               }
             } catch (_) {}
           }
         } catch (err) {
           console.warn(`Error cargando Home de ${inst.name}:`, err);
+          diagLog("error", `Inicio de ${inst.name} → ${(err && (err.userMessage || err.message)) || err}`);
         }
       }
 
+      if (run !== homeRefreshRun) return;
       state.homeRows = allRows;
       setStatus(allRows.length ? `Inicio actualizado (${allRows.length} filas activas)` : "Instala o activa plugins en la Tienda para poblar tu Inicio");
       if (state.view === "home") renderView();
@@ -1505,33 +1609,133 @@
       return state.installed.some(x => x.id === id);
     }
 
+    // Plugins con una instalación/desinstalación en curso: un segundo OK mientras
+    // se instala ya no lo desinstala a medias.
+    const pluginsBusy = new Set();
+
+    // Comprueba que el plugin realmente carga ANTES de darlo por instalado.
+    // Antes se agregaba a la lista y se mostraba "✅ instalado" aunque fallara.
+    async function validatePluginEntry(entry) {
+      if (entry.stremio) {
+        const r = await withTimeout(smartFetch(entry.stremio, { timeoutMs: 20000 }), 30000, entry.name);
+        if (!r.ok) throw new Error(`El addon respondió HTTP ${r.status}`);
+        let m;
+        try { m = JSON.parse(stripBom(r.text)); } catch (_) { throw new Error("La URL no devuelve un manifest.json válido"); }
+        if (!m || (!m.id && !Array.isArray(m.catalogs) && !Array.isArray(m.resources))) {
+          throw new Error("El manifest.json no parece un addon de Stremio");
+        }
+        return { name: m.name };
+      }
+      if (entry.address) {
+        delete state.loadedModules[entry.id]; // versión fresca del repositorio
+        const mod = await withTimeout(loadGitHubPlugin(entry), 60000, entry.name);
+        const fns = mod && mod.exports ? Object.keys(mod.exports).filter(k => typeof mod.exports[k] === "function") : [];
+        if (!fns.length) throw new Error("El plugin no exporta ninguna función (home, search, resolve...)");
+        return { name: mod.manifest && mod.manifest.name };
+      }
+      throw new Error("Falta la dirección del plugin (repositorio GitHub o manifest.json)");
+    }
+
     async function toggleInstallPlugin(entry) {
-      const idx = state.installed.findIndex(x => x.id === entry.id);
-      if (idx >= 0) {
-        state.installed.splice(idx, 1);
-        delete state.loadedModules[entry.id];
-        saveStore("kino_installed_v2", state.installed);
-        updateBadges();
-        setStatus(`Desinstalado: ${entry.name}`);
-        renderView();
-        refreshHomeCatalog();
+      if (pluginsBusy.has(entry.id)) {
+        setStatus(`⏳ ${entry.name}: espera, ya se está procesando...`);
         return;
       }
+      pluginsBusy.add(entry.id);
+      try {
+        const idx = state.installed.findIndex(x => x.id === entry.id);
+        if (idx >= 0) {
+          state.installed.splice(idx, 1);
+          delete state.loadedModules[entry.id];
+          // Quitar también los canales que ese plugin había agregado a En Vivo
+          state.liveChannels = state.liveChannels.filter(ch => ch.pluginId !== entry.id);
+          saveStore("kino_installed_v2", state.installed);
+          updateBadges();
+          setStatus(`Desinstalado: ${entry.name}`);
+          renderView();
+          refreshHomeCatalog();
+          return;
+        }
 
-      const newInst = {
-        id: entry.id,
-        name: entry.name,
-        address: entry.address || null,
-        stremio: entry.stremio || null,
-        enabled: true
-      };
-      state.installed.push(newInst);
-      saveStore("kino_installed_v2", state.installed);
-      updateBadges();
-      setStatus(`Instalando y cargando ${entry.name}...`);
-      renderView();
-      await refreshHomeCatalog();
-      setStatus(`✅ ${entry.name} instalado y activo`);
+        setStatus(`Instalando ${entry.name}: descargando y comprobando el plugin...`);
+        let info;
+        try {
+          info = await validatePluginEntry(entry);
+        } catch (e) {
+          delete state.loadedModules[entry.id];
+          const why = (e && (e.userMessage || e.message)) || String(e);
+          diagLog("error", `Instalar ${entry.name} → ${why}`);
+          setStatus(`✗ No se instaló ${entry.name}: ${why}`, { priority: true });
+          return;
+        }
+
+        const displayName = (entry.isCustom && info && info.name) || entry.name;
+        // Puede haberse instalado por otra vía mientras se validaba
+        if (!isInstalled(entry.id)) {
+          state.installed.push({
+            id: entry.id,
+            name: displayName,
+            address: entry.address || null,
+            stremio: entry.stremio || null,
+            enabled: true
+          });
+          saveStore("kino_installed_v2", state.installed);
+        }
+        updateBadges();
+        renderView();
+        setStatus(`✅ ${displayName} instalado y activo · cargando su contenido en Inicio...`, { priority: true });
+        // El Inicio se recarga en segundo plano: antes la instalación esperaba a
+        // TODOS los plugins (minutos) y parecía colgada.
+        refreshHomeCatalog();
+      } finally {
+        pluginsBusy.delete(entry.id);
+      }
+    }
+
+    // Acepta "usuario/repo", URLs de github.com (con .git, /tree/rama, etc.)
+    // y addons de Stremio (https://… o stremio://…/manifest.json).
+    function parsePluginInput(raw) {
+      let txt = String(raw || "").trim();
+      if (!txt) return null;
+      if (/^stremio:\/\//i.test(txt)) txt = "https://" + txt.replace(/^stremio:\/\//i, "");
+      if (/manifest\.json(\?.*)?$/i.test(txt)) {
+        if (!/^https?:\/\//i.test(txt)) txt = "https://" + txt;
+        return { kind: "stremio", url: txt };
+      }
+      const m = txt
+        .replace(/^https?:\/\//i, "")
+        .replace(/^(www\.)?github\.com\//i, "")
+        .match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/);
+      if (!m) return null;
+      return { kind: "github", repo: `${m[1]}/${m[2].replace(/\.git$/i, "")}` };
+    }
+
+    async function installFromManualInput(raw) {
+      const parsed = parsePluginInput(raw);
+      if (!parsed) {
+        setStatus("✗ Escribe usuario/repositorio de GitHub o una URL que termine en manifest.json", { priority: true });
+        return;
+      }
+      const same = parsed.kind === "github"
+        ? (x => x.address && x.address.toLowerCase() === parsed.repo.toLowerCase())
+        : (x => x.stremio && x.stremio === parsed.url);
+      // Antes, escribir un plugin ya instalado lo DESINSTALABA sin avisar
+      const already = state.installed.find(same);
+      if (already) {
+        setStatus(`ℹ️ ${already.name} ya está instalado`, { priority: true });
+        return;
+      }
+      // Si está en la tienda, usar su ficha (id y nombre correctos, sin duplicados)
+      const storeEntry = state.storeEntries.find(same);
+      if (storeEntry) { await toggleInstallPlugin(storeEntry); return; }
+
+      if (parsed.kind === "stremio") {
+        const id = "custom_" + parsed.url.replace(/^https?:\/\//i, "").replace(/[^A-Za-z0-9]+/g, "_").slice(0, 60);
+        await toggleInstallPlugin({ id, name: "Addon Personalizado", stremio: parsed.url, isCustom: true });
+      } else {
+        const id = "gh_" + parsed.repo.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+        await toggleInstallPlugin({ id, name: parsed.repo, address: parsed.repo, isCustom: true });
+      }
     }
 
     async function openPluginConfigModal(entry) {
@@ -1698,16 +1902,10 @@
         wrap.appendChild(manualBox);
         viewContent.appendChild(wrap);
         document.getElementById("customPluginInstallBtn").addEventListener("click", async () => {
-          const raw = document.getElementById("customPluginInput").value.trim();
-          if (!raw) return;
-          if (raw.endsWith("manifest.json")) {
-            const id = "custom_" + Math.random().toString(36).slice(2, 8);
-            await toggleInstallPlugin({ id, name: "Addon Personalizado", stremio: raw });
-          } else {
-            const cleanRepo = raw.replace("https://github.com/", "").replace(/\/$/, "");
-            const id = cleanRepo.split("/").pop().toLowerCase();
-            await toggleInstallPlugin({ id, name: cleanRepo, address: cleanRepo });
-          }
+          await installFromManualInput(document.getElementById("customPluginInput").value);
+        });
+        document.getElementById("customPluginInput").addEventListener("keydown", e => {
+          if (e.key === "Enter") installFromManualInput(e.target.value);
         });
         return;
       }
@@ -1833,8 +2031,8 @@
           smartFetch("https://raw.githubusercontent.com/kinotvapp/kino-plugins/main/index.json"),
           smartFetch("https://raw.githubusercontent.com/kinotvapp/kino-plugins/main/catalog.json")
         ]);
-        const newComm = idxRes.ok ? (JSON.parse(idxRes.text).entries || KINO_COMMUNITY_STORE) : KINO_COMMUNITY_STORE;
-        const newSeed = catRes.ok ? (JSON.parse(catRes.text).plugins || KINO_SEED_PLUGINS) : KINO_SEED_PLUGINS;
+        const newComm = idxRes.ok ? (JSON.parse(stripBom(idxRes.text)).entries || KINO_COMMUNITY_STORE) : KINO_COMMUNITY_STORE;
+        const newSeed = catRes.ok ? (JSON.parse(stripBom(catRes.text)).plugins || KINO_SEED_PLUGINS) : KINO_SEED_PLUGINS;
         state.storeEntries = buildUnifiedStore(newSeed, newComm);
         setStatus(`Tienda actualizada: ${state.storeEntries.length} plugins disponibles`);
         renderView();
@@ -2066,7 +2264,7 @@
             });
             row.querySelector("[data-del]").addEventListener("click", () => {
               state.liveChannels.splice(idx, 1);
-              saveStore("kino_m3u_v2", state.liveChannels);
+              saveStore("kino_m3u_v2", state.liveChannels.filter(ch => !ch.pluginId)); // los de plugins se recargan solos
               renderChannels();
             });
             listDiv.appendChild(row);
@@ -2091,14 +2289,14 @@
                   state.liveChannels.push({ name: currentName, url: line.trim(), group: name });
                 }
               });
-              saveStore("kino_m3u_v2", state.liveChannels);
+              saveStore("kino_m3u_v2", state.liveChannels.filter(ch => !ch.pluginId)); // los de plugins se recargan solos
               renderChannels();
               setStatus("Lista M3U importada");
               return;
             } catch (_) {}
           }
           state.liveChannels.push({ name, url, group: "Personalizado" });
-          saveStore("kino_m3u_v2", state.liveChannels);
+          saveStore("kino_m3u_v2", state.liveChannels.filter(ch => !ch.pluginId)); // los de plugins se recargan solos
           renderChannels();
         });
       } else if (state.view === "favorites") {
