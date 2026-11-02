@@ -1357,6 +1357,10 @@
           e.stopPropagation();
           handoffToVidaaNativePlayer(src.url, item.title);
         });
+        row.addEventListener("click", () => {
+          state.currentSourceIndex = idx;
+          startPlaybackSource(src, item.title);
+        });
         sl.appendChild(row);
       });
     }
@@ -1491,7 +1495,7 @@
         `;
         const imgEl = card.querySelector("img");
         imgEl.addEventListener("error", () => { imgEl.src = fallbackImg; });
-        card.addEventListener("click", () => openDetail(item));
+        card.addEventListener("click", () => { state.lastFocusedCard = card; openDetail(item); });
         grid.appendChild(card);
       });
       return grid;
@@ -2596,6 +2600,7 @@
       const video = document.getElementById("videoPlayer");
       const iframe = document.getElementById("webPlayerFrame");
       if (state.hlsInstance) { state.hlsInstance.destroy(); state.hlsInstance = null; }
+      video.onerror = null;
       video.pause();
       video.removeAttribute("src");
       video.style.display = "none";
@@ -2715,6 +2720,9 @@
 
     document.getElementById("closeDetailBtn").addEventListener("click", () => {
       document.getElementById("detailOverlay").classList.remove("open");
+      const card = state.lastFocusedCard;
+      if (card && document.body.contains(card)) card.focus();
+      else document.getElementById("navHome").focus();
     });
 
     document.getElementById("saveConfigBtn").addEventListener("click", async () => {
@@ -2739,13 +2747,21 @@
     document.getElementById("closePlayerBtn").addEventListener("click", () => {
       const video = document.getElementById("videoPlayer");
       const iframe = document.getElementById("webPlayerFrame");
+      // Quitar el handler ANTES de vaciar el src: si no, el evento "error" que
+      // dispara un src vacío reintenta vía proxy y vuelve a abrir el player.
+      video.onerror = null;
+      if (state.hlsInstance) { state.hlsInstance.destroy(); state.hlsInstance = null; }
       video.pause();
-      video.src = "";
+      video.removeAttribute("src");
+      try { video.load(); } catch (_) {}
       video.style.display = "";
       iframe.src = "about:blank";
       iframe.style.display = "none";
-      if (state.hlsInstance) { state.hlsInstance.destroy(); state.hlsInstance = null; }
       document.getElementById("playerOverlay").classList.remove("open");
+      // Devolver el foco a la ficha para seguir navegando con el control
+      if (document.getElementById("detailOverlay").classList.contains("open")) {
+        document.getElementById("playDirectBtn").focus();
+      }
     });
 
     // Cicla por los servidores de la ficha (embed o directos) sin salir del player
@@ -2793,8 +2809,26 @@
       if (e.keyCode === 405 && state.activeVideoUrl) {
         handoffToVidaaNativePlayer(state.activeVideoUrl, "Kino TV");
       }
+      // OK del control remoto: los navegadores solo "clican" con Enter en
+      // <button>/<a>. Las tarjetas y filas de servidores son <div>, así que
+      // hay que disparar el clic a mano o nunca se abre la ficha/el video.
+      if (e.key === "Enter" || e.keyCode === 13) {
+        const el = document.activeElement;
+        if (el && el.classList && el.classList.contains("focusable") &&
+            !/^(BUTTON|A|INPUT|SELECT|TEXTAREA)$/.test(el.tagName)) {
+          e.preventDefault();
+          el.click();
+          return;
+        }
+      }
       if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
-        const focusables = Array.from(document.querySelectorAll(".focusable")).filter(el => el.offsetParent !== null);
+        const activeTag = document.activeElement && document.activeElement.tagName;
+        if ((activeTag === "INPUT" || activeTag === "TEXTAREA") && (e.key === "ArrowLeft" || e.key === "ArrowRight")) return;
+        // Con un modal abierto, solo se navega dentro de él (no por la grilla de atrás)
+        const scope = ["playerOverlay", "configOverlay", "detailOverlay"]
+          .map(id => document.getElementById(id))
+          .find(o => o.classList.contains("open")) || document;
+        const focusables = Array.from(scope.querySelectorAll(".focusable")).filter(el => el.offsetParent !== null);
         if (!focusables.length) return;
         const current = document.activeElement;
         const idx = focusables.indexOf(current);
