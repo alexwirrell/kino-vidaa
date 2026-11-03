@@ -749,7 +749,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r30-2026-11-05";
+    const BUILD_TAG = "r31-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -1031,7 +1031,11 @@
           let finalUrl = url;
           try { finalUrl = res.headers.get("X-Final-Url") || url; } catch (_) {}
           if (proxyPrefix === state.customProxy && res.status >= 500) {
-            diagLog("red", `   ↳ tu proxy respondió: ${String(txt || "").slice(0, 140)}`);
+            // Las páginas de error de Cloudflare son HTML: mostrar su título y código, no el <!DOCTYPE…>
+            const raw0 = String(txt || "");
+            const ttl = (/<title>([^<]{1,160})<\/title>/i.exec(raw0) || [])[1];
+            const code = (/Error code\s*(\d{3,4})|error-code[^>]*>\s*(\d{3,4})/i.exec(raw0) || []).slice(1).find(Boolean);
+            diagLog("red", `   ↳ tu proxy respondió: ${ttl ? ttl.replace(/\s+/g, " ").trim() + (code && !ttl.includes(code) ? ` (código ${code})` : "") : raw0.slice(0, 140)}`);
           }
           return { ok: res.ok, status: res.status, url: finalUrl, text: txt, raw, headers: proxyPrefix === state.customProxy ? collectHeaders(res) : {}, truncated, via: proxyPrefix };
         } catch (e) {
@@ -1994,7 +1998,7 @@
       text.replace(/#EXTINF:([\d.]+)/g, (_, d) => { total += Number(d) || 0; segs++; return ""; });
       const hosts = [...new Set(uris.map(u => (/^https?:\/\/([^/]+)/.exec(u) || [, "relativa"])[1]))].slice(0, 3);
       const fmt = s => s >= 60 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${Math.round(s)} s`;
-      return `lista de video: ${segs} tramos · ${fmt(total)}${text.includes("#EXT-X-ENDLIST") ? "" : " · en vivo"} · ${hosts.join(", ")}`;
+      return `lista de video: ${segs} tramos · ${fmt(total)}${text.includes("#EXT-X-ENDLIST") ? "" : " · sin marca de fin"} · ${hosts.join(", ")}`;
     }
 
     // Rescate de listas HLS: algunos plugins descartan un episodio completo por error (p. ej.
@@ -5197,6 +5201,7 @@ async function handle(request) {
           // solo la siguiente que no haya fallado (hasta 4 saltos seguidos)
           const listed = (state.directStreams || []).find(x => x.url === url);
           if (listed) listed.failed = true;
+          badMedia.add(url);
           const pending = (state.directStreams || []).filter(x => (x.url || x.lazyRef) && !x.failed);
           if (listed && pending.length && (state.autoHops || 0) < 4) {
             state.autoHops = (state.autoHops || 0) + 1;
@@ -5230,6 +5235,7 @@ async function handle(request) {
           if (!opts.live && it && !/live|music|trailer|clip/i.test(String(it.kind || "")) && isFinite(d) && d > 0 && d < 60) {
             diagLog("player", `⚠️ el servidor dio un video de ${Math.round(d)} s (relleno, no la película): se prueba otra copia`);
             playerUI.osd(`⚠️ Video de ${Math.round(d)} s: no es la película · probando otra copia…`);
+            badMedia.add(String(url).split(/[?#]/)[0]); // otra copia que dé este mismo clip se salta sin probarla
             stageIdx = stages.length - 1; // no repetir este enlace por otras vías
             nextStage();
           }
@@ -6070,6 +6076,12 @@ async function handle(request) {
     // Cicla por los servidores de la ficha (embed o directos) sin salir del player
     // ⏮ Anterior / Siguiente ⏭: recorre los enlaces directos (si se ve uno) o los servidores web
     // Resuelve una alternativa "diferida" del plugin (ref sin URL todavía)
+    // Videos que ya fallaron o eran relleno (p. ej. el clip de 13 s que repiten varias copias):
+    // si otra alternativa devuelve el mismo, se salta sin gastar uno de los intentos automáticos.
+    const badMedia = new Set();
+    // auto: también los que fallaron (429, error); a mano (⏭) solo el relleno, que nunca es la película
+    function isBadMedia(u, auto) { return !!u && ((auto && badMedia.has(u)) || badMedia.has(String(u).split(/[?#]/)[0])); }
+
     async function resolveLazyStream(entry) {
       const inst = state.installed.find(x => x.id === entry.lazyPluginId);
       if (!inst) return false;
@@ -6095,6 +6107,7 @@ async function handle(request) {
           if (auto && nxt.failed) continue;
           playerUI.osd(`${delta > 0 ? "⏭" : "⏮"} ${nxt.label}${nxt.url ? "" : " (resolviendo…)"}`);
           if (!nxt.url && !(await resolveLazyStream(nxt))) { nxt.failed = true; diagLog("player", `✗ la alternativa «${nxt.label}» no dio enlace`); continue; }
+          if (isBadMedia(nxt.url, auto)) { nxt.failed = true; diagLog("player", `⏭ «${nxt.label}» dio el mismo video que ya falló: se salta sin probarlo`); continue; }
           if (!playerUI.isOpen()) return;
           startPlayback(nxt.url, `${state.selectedItem ? state.selectedItem.title : "Kino TV"} (${nxt.label})`, { mime: nxt.mime, referer: refOf(nxt), subtitles: nxt.subtitles });
           return;
