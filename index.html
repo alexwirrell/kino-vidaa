@@ -382,6 +382,9 @@
     .hud-info { flex: 1; min-width: 0; }
     .hud-progress { display: flex; align-items: center; gap: 12px; margin-top: 10px; font-size: 13px; color: var(--muted); }
     .hud-bar { flex: 1; height: 6px; background: rgba(255,255,255,0.15); border-radius: 3px; overflow: hidden; }
+    .hud-seek { flex: 1; display: flex; align-items: center; background: transparent; border: 2px solid transparent; border-radius: 8px; padding: 8px 6px; cursor: pointer; }
+    .hud-seek:focus .hud-bar { height: 10px; }
+    .hud-seek:focus { border-color: var(--accent); }
     #hudBarFill { height: 100%; width: 0; background: var(--accent); }
     .player-osd {
       position: absolute; top: 36px; right: 44px; z-index: 6;
@@ -502,7 +505,8 @@
         <div id="nowPlayingTitle" style="font-size: 18px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Reproduciendo...</div>
         <div id="nowPlayingSub" style="font-size: 13px; color: var(--muted);">OK: Pausa/Play · ◀ ▶: 10 s · Back: Salir</div>
         <div class="hud-progress video-only">
-          <div class="hud-bar"><div id="hudBarFill"></div></div>
+          <!-- Barra de progreso seleccionable: ▲ desde los botones, ◀ ▶ para moverse por el video -->
+          <button class="hud-seek focusable" id="hudSeek" aria-label="Barra de progreso"><div class="hud-bar"><div id="hudBarFill"></div></div></button>
           <span id="hudTime">0:00</span>
         </div>
       </div>
@@ -738,7 +742,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r20-2026-11-05";
+    const BUILD_TAG = "r21-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -959,7 +963,9 @@
       const method = (options.method || "GET").toUpperCase();
       // Copia: antes se escribía Content-Type en el objeto del plugin
       const headers = Object.assign({}, options.headers || {});
-      const cap = Number(options.maxBytes) > 0 ? Math.min(2000000, Number(options.maxBytes)) : 0;
+      // Para un archivo de video basta con leer el comienzo (antes se bajaban hasta 4 MB
+      // solo para comprobar que el enlace responde, y algunos CDN cortan por exceso: 429)
+      const cap = Number(options.maxBytes) > 0 ? Math.min(2000000, Number(options.maxBytes)) : (isMediaUrl(url) ? 256 * 1024 : 0);
       const manual = options.redirect === "manual";
       const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 20000;
       let body = undefined;
@@ -4921,6 +4927,18 @@ export default {
         cleanup();
         stageIdx++;
         if (stageIdx >= stages.length) {
+          // Si este enlace es parte de una lista (alternativas del plugin), probar
+          // solo la siguiente que no haya fallado (hasta 4 saltos seguidos)
+          const listed = (state.directStreams || []).find(x => x.url === url);
+          if (listed) listed.failed = true;
+          const pending = (state.directStreams || []).filter(x => (x.url || x.lazyRef) && !x.failed);
+          if (listed && pending.length && (state.autoHops || 0) < 4) {
+            state.autoHops = (state.autoHops || 0) + 1;
+            playerUI.osd(`✗ Este servidor no respondió · probando otro (${state.autoHops}/4)…`);
+            diagLog("player", `↪ probando la siguiente alternativa automáticamente (${pending.length} pendientes)`);
+            setTimeout(() => { if (run === playbackRun) cycleServer(1, true); }, 900);
+            return;
+          }
           setStatus("No se pudo reproducir este enlace — prueba ⏭ Siguiente o 🟡 Nativo VIDAA", { priority: true });
           document.getElementById("nowPlayingSub").textContent = "✗ Este enlace no se pudo reproducir en el TV · ⏭ Siguiente para probar otro · detalles en 🩺 Diagnóstico";
           playerUI.osd("✗ No se pudo reproducir este enlace");
@@ -5125,6 +5143,29 @@ export default {
       }
       // Con el panel de subtítulos abierto, las flechas recorren sus opciones
       if (Subs.isOpen()) { clearTimeout(playerUI.hideTimer); return false; }
+      // Barra de progreso seleccionada: ◀ ▶ se mueven por el video (acelera al mantener), OK pausa
+      if (document.activeElement && document.activeElement.id === "hudSeek") {
+        if (k === "ArrowLeft" || k === "ArrowRight") {
+          e.preventDefault();
+          const now = Date.now();
+          playerUI.seekStreak = (k === playerUI.seekKey && now - (playerUI.seekAt || 0) < 400) ? (playerUI.seekStreak || 0) + 1 : 0;
+          playerUI.seekKey = k; playerUI.seekAt = now;
+          const step = playerUI.seekStreak > 12 ? 120 : playerUI.seekStreak > 5 ? 60 : playerUI.seekStreak > 2 ? 30 : 10;
+          playerUI.seek(k === "ArrowLeft" ? -step : step);
+          playerUI.scheduleHide();
+          return true;
+        }
+        if (k === "Enter" || c === 13) { e.preventDefault(); playerUI.togglePlay(); playerUI.scheduleHide(); return true; }
+        if (k === "ArrowDown") { e.preventDefault(); playerUI.defaultButton().focus(); playerUI.scheduleHide(); return true; }
+      }
+      // ▲ desde los botones: a la barra de progreso (está a la izquierda, a la misma altura)
+      const vdur = playerUI.video().duration;
+      if (k === "ArrowUp" && !playerUI.isEmbed() && isFinite(vdur) && vdur > 0 && document.activeElement && document.activeElement.closest && document.activeElement.closest(".player-hud .btn-group")) {
+        e.preventDefault();
+        document.getElementById("hudSeek").focus();
+        playerUI.scheduleHide();
+        return true;
+      }
       // ▼ con la barra visible: ocultarla (antes no había forma de quitarla)
       if (k === "ArrowDown") {
         e.preventDefault();
@@ -5543,6 +5584,7 @@ export default {
       const it = state.selectedItem;
       if (!it) return;
       markUserPlayIntent();
+      state.autoHops = 0;
       const playDirect = () => {
         const d = (state.directStreams || []).find(x => x.url);
         if (d) { startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime, referer: refOf(d), subtitles: d.subtitles }); return true; }
@@ -5738,13 +5780,36 @@ export default {
 
     // Cicla por los servidores de la ficha (embed o directos) sin salir del player
     // ⏮ Anterior / Siguiente ⏭: recorre los enlaces directos (si se ve uno) o los servidores web
-    function cycleServer(delta) {
-      const directs = (state.directStreams || []).filter(x => x.url);
-      if (!playerUI.isEmbed() && directs.length > 1) {
-        const cur = Math.max(0, directs.findIndex(x => x.url === state.activeVideoUrl));
-        const nxt = directs[(cur + delta + directs.length) % directs.length];
-        playerUI.osd(`${delta > 0 ? "⏭" : "⏮"} ${nxt.label}`);
-        startPlayback(nxt.url, `${state.selectedItem ? state.selectedItem.title : "Kino TV"} (${nxt.label})`, { mime: nxt.mime, referer: refOf(nxt), subtitles: nxt.subtitles });
+    // Resuelve una alternativa "diferida" del plugin (ref sin URL todavía)
+    async function resolveLazyStream(entry) {
+      const inst = state.installed.find(x => x.id === entry.lazyPluginId);
+      if (!inst) return false;
+      markUserPlayIntent();
+      try {
+        const res = await withTimeout(callPluginFn(inst, "resolve", entry.lazyRef), 40000, inst.name);
+        if (!res || !res.url) return false;
+        Object.assign(entry, { url: res.url, mime: res.mime, headers: res.headers, subtitles: res.subtitles });
+        return true;
+      } catch (_) { return false; }
+    }
+    // ⏮ Anterior / Siguiente ⏭: recorre los enlaces directos (incluidas las
+    // alternativas por resolver del plugin) o, en una página embed, los servidores web
+    async function cycleServer(delta, auto) {
+      if (!auto) state.autoHops = 0;
+      const list = (state.directStreams || []).filter(x => x.url || x.lazyRef);
+      if (!playerUI.isEmbed() && list.length > 1) {
+        let cur = list.findIndex(x => x.url && x.url === state.activeVideoUrl);
+        if (cur < 0) cur = 0;
+        for (let hop = 1; hop < list.length; hop++) {
+          const nxt = list[((cur + delta * hop) % list.length + list.length) % list.length];
+          if (auto && nxt.failed) continue;
+          playerUI.osd(`${delta > 0 ? "⏭" : "⏮"} ${nxt.label}${nxt.url ? "" : " (resolviendo…)"}`);
+          if (!nxt.url && !(await resolveLazyStream(nxt))) { nxt.failed = true; diagLog("player", `✗ la alternativa «${nxt.label}» no dio enlace`); continue; }
+          if (!playerUI.isOpen()) return;
+          startPlayback(nxt.url, `${state.selectedItem ? state.selectedItem.title : "Kino TV"} (${nxt.label})`, { mime: nxt.mime, referer: refOf(nxt), subtitles: nxt.subtitles });
+          return;
+        }
+        playerUI.osd("No hay más servidores que probar");
         return;
       }
       if (!state.activeSources.length) { setStatus("No hay más servidores en la lista"); playerUI.osd("No hay más servidores"); return; }
