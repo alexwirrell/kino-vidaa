@@ -749,7 +749,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r29-2026-11-05";
+    const BUILD_TAG = "r30-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -1843,7 +1843,7 @@
       const key = state.tmdbKey;
       const tm = async (path, params = {}) => {
         const qs = new URLSearchParams(Object.assign({ api_key: key, language: "es-MX" }, params));
-        const r = await smartFetch(`https://api.themoviedb.org/3${path}?${qs}`, { timeoutMs: 8000 });
+        const r = await smartFetch(`https://api.themoviedb.org/3${path}?${qs}`, { timeoutMs: 8000, noPublicProxy: true }); // la llave nunca por proxies públicos
         if (r.status === 429) throw Object.assign(new Error("rate_limited"), { code: "rate_limited" });
         if (r.status === 404) return null;
         if (!r.ok) throw Object.assign(new Error(`TMDB HTTP ${r.status}`), { code: "unavailable" });
@@ -2192,7 +2192,7 @@
           const clean = {};
           Object.keys(params || {}).forEach(k => { if (params[k] !== undefined && params[k] !== null && params[k] !== "" && k !== "api_key") clean[k] = params[k]; });
           const q = new URLSearchParams(Object.assign(clean, { api_key: key }));
-          const r = await smartFetch(`https://api.themoviedb.org/3${String(path).startsWith("/") ? path : "/" + path}?${q}`);
+          const r = await smartFetch(`https://api.themoviedb.org/3${String(path).startsWith("/") ? path : "/" + path}?${q}`, { noPublicProxy: true }); // la llave nunca por proxies públicos
           if (r.status === 429) { const e = new Error("TMDB: demasiadas peticiones"); e.code = "rate_limited"; throw e; }
           if (!r.ok) { const e = new Error(`TMDB respondió HTTP ${r.status}`); e.code = r.status === 401 ? "unavailable" : "network"; throw e; }
           return JSON.parse(r.text);
@@ -3791,7 +3791,12 @@
           // Recargar los módulos para que los plugins vuelvan a pedir a TMDB con la llave
           state.loadedModules = {};
           refreshHomeCatalog();
-          setStatus("Ajustes guardados correctamente");
+          // TMDB da dos claves: la app usa la "Clave de la API" (v3, 32 caracteres), no el token largo (v4)
+          if (state.tmdbKey && !/^[0-9a-f]{32}$/i.test(state.tmdbKey)) {
+            setStatus(state.tmdbKey.length > 40
+              ? "⚠️ Esa es el «Token de acceso de lectura» (v4). Escribe la «Clave de la API» (v3): 32 letras y números"
+              : `⚠️ La llave de TMDB debe tener 32 letras y números (tiene ${state.tmdbKey.length}): revísala`);
+          } else setStatus("Ajustes guardados correctamente");
         });
       } else if (state.view === "diag") {
         viewTitle.textContent = `Diagnóstico de Plugins y Red (build ${BUILD_TAG})`;
