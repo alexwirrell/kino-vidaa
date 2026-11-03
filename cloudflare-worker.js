@@ -28,6 +28,8 @@
 //      &hdr=<JSON>      opcional: cabeceras extra {"User-Agent": "...", "Cookie": "..."}
 // =============================================================================
 
+import { connect } from "cloudflare:sockets";
+
 const ACCESS_KEY = ""; // ← pon aquí tu clave (p. ej. "mi-clave-larga-123"); vacío = sin clave
 
 const BROWSER_UA =
@@ -36,6 +38,117 @@ const BROWSER_UA =
 // Cabeceras del navegador del TV que no se reenvían al destino
 const DROP = ["host", "origin", "referer", "cookie", "cf-connecting-ip", "cf-ipcountry", "cf-ray", "cf-visitor",
   "x-forwarded-for", "x-forwarded-proto", "x-real-ip", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"];
+
+// ---------------------------------------------------------------------------
+// Canales en vivo en http://IP:PUERTO (p. ej. TV Latam: http://190.108.83.69:8000).
+// El fetch() de Cloudflare solo conecta a algunos puertos (y no a toda IP), así
+// que para esos se habla HTTP "a mano" por una conexión TCP (cloudflare:sockets),
+// enviando el video por streaming (sin acumularlo: poco CPU en el plan gratis).
+// ---------------------------------------------------------------------------
+const FETCH_PORTS = { "http:": ["", "80", "8080", "8880", "2052", "2082", "2086", "2095"],
+                      "https:": ["", "443", "2053", "2083", "2087", "2096", "8443"] };
+const isIpHost = h => /^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(":") || h.startsWith("[");
+const needsSocket = u => !FETCH_PORTS[u.protocol].includes(u.port) || isIpHost(u.hostname);
+
+function joinBytes(a, b) {
+  if (!a.length) return b;
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a); out.set(b, a.length);
+  return out;
+}
+function indexOfSeq(buf, seq) {
+  outer: for (let i = 0; i + seq.length <= buf.length; i++) {
+    for (let j = 0; j < seq.length; j++) if (buf[i + j] !== seq[j]) continue outer;
+    return i;
+  }
+  return -1;
+}
+const CRLF = [13, 10], CRLF2 = [13, 10, 13, 10];
+
+async function socketFetch(u, method, headers, body, manual, hops = 0) {
+  const secure = u.protocol === "https:";
+  const sock = connect({ hostname: u.hostname.replace(/^\[|\]$/g, ""), port: Number(u.port || (secure ? 443 : 80)) },
+    secure ? { secureTransport: "on", allowHalfOpen: false } : { allowHalfOpen: false });
+  const w = sock.writable.getWriter();
+  let head = `${method} ${u.pathname || "/"}${u.search} HTTP/1.1\r\nHost: ${u.host}\r\nConnection: close\r\nAccept-Encoding: identity\r\n`;
+  for (const [k, v] of headers) if (!/^(host|connection|accept-encoding|content-length|transfer-encoding)$/i.test(k)) head += `${k}: ${v}\r\n`;
+  if (body) head += `Content-Length: ${body.byteLength}\r\n`;
+  await w.write(new TextEncoder().encode(head + "\r\n"));
+  if (body) await w.write(new Uint8Array(body));
+  w.releaseLock();
+
+  const reader = sock.readable.getReader();
+  let pending = new Uint8Array(0);
+  const readMore = async () => { const { value, done } = await reader.read(); if (done) return false; pending = joinBytes(pending, value); return true; };
+  let end = -1;
+  while ((end = indexOfSeq(pending, CRLF2)) < 0) {
+    if (pending.length > 65536) throw new Error("cabeceras demasiado grandes");
+    if (!(await readMore())) throw new Error("el servidor cerró la conexión sin responder");
+  }
+  const lines = new TextDecoder().decode(pending.subarray(0, end)).split("\r\n");
+  pending = pending.subarray(end + 4);
+  const m = /^HTTP\/\d(?:\.\d)?\s+(\d{3})\s*(.*)$/.exec(lines[0]);
+  if (!m) throw new Error("respuesta que no es HTTP");
+  const status = Number(m[1]);
+  const rh = new Headers();
+  for (const l of lines.slice(1)) { const i = l.indexOf(":"); if (i > 0) rh.append(l.slice(0, i).trim(), l.slice(i + 1).trim()); }
+
+  if (!manual && [301, 302, 303, 307, 308].includes(status) && rh.get("location") && hops < 5) {
+    reader.cancel().catch(() => {});
+    const next = new URL(rh.get("location"), u);
+    const m2 = status === 303 ? "GET" : method, b2 = m2 === "GET" || m2 === "HEAD" ? undefined : body;
+    if (needsSocket(next)) return socketFetch(next, m2, headers, b2, manual, hops + 1);
+    const r = await fetch(next.toString(), { method: m2, headers, body: b2 });
+    return { status: r.status, statusText: r.statusText, headers: r.headers, body: r.body, url: r.url };
+  }
+
+  const chunked = /chunked/i.test(rh.get("transfer-encoding") || "");
+  let remaining = method === "HEAD" || status === 204 || status === 304 ? 0 : (rh.has("content-length") ? Number(rh.get("content-length")) : -1);
+  ["transfer-encoding", "connection", "keep-alive"].forEach(h => rh.delete(h));
+  let chunkLeft = 0, needCRLF = false;
+  const stop = ctrl => { ctrl.close(); reader.cancel().catch(() => {}); };
+  const stream = new ReadableStream({
+    async pull(ctrl) {
+      for (;;) {
+        if (!chunked) {
+          if (pending.length) {
+            const out = remaining >= 0 ? pending.subarray(0, remaining) : pending;
+            pending = new Uint8Array(0);
+            if (remaining >= 0) remaining -= out.length;
+            if (out.length) ctrl.enqueue(out);
+            if (remaining === 0) stop(ctrl);
+            return;
+          }
+          if (remaining === 0) { stop(ctrl); return; }
+          if (!(await readMore())) { ctrl.close(); return; }
+          continue;
+        }
+        // Transfer-Encoding: chunked
+        if (chunkLeft > 0) {
+          if (!pending.length && !(await readMore())) { ctrl.close(); return; }
+          const out = pending.subarray(0, chunkLeft);
+          pending = pending.subarray(out.length);
+          chunkLeft -= out.length;
+          if (!chunkLeft) needCRLF = true;
+          ctrl.enqueue(out);
+          return;
+        }
+        if (needCRLF) {
+          if (pending.length < 2) { if (!(await readMore())) { ctrl.close(); return; } continue; }
+          pending = pending.subarray(2); needCRLF = false; continue;
+        }
+        const i = indexOfSeq(pending, CRLF);
+        if (i < 0) { if (!(await readMore())) { ctrl.close(); return; } continue; }
+        const size = parseInt(new TextDecoder().decode(pending.subarray(0, i)).split(";")[0].trim(), 16);
+        pending = pending.subarray(i + 2);
+        if (!size) { stop(ctrl); return; }
+        chunkLeft = size;
+      }
+    },
+    cancel() { reader.cancel().catch(() => {}); }
+  });
+  return { status, statusText: m[2] || "", headers: rh, body: stream, url: u.toString() };
+}
 
 function cors(headers) {
   headers.set("Access-Control-Allow-Origin", "*");
@@ -86,7 +199,9 @@ export default {
     try {
       // &redir=manual: devolver el 3xx con su Location (kino.fetch redirect "manual")
       const redirect = self.searchParams.get("redir") === "manual" ? "manual" : "follow";
-      upstream = await fetch(dest.toString(), { method: request.method, headers, body, redirect });
+      upstream = needsSocket(dest)
+        ? await socketFetch(dest, request.method, headers, body, redirect === "manual")
+        : await fetch(dest.toString(), { method: request.method, headers, body, redirect });
     } catch (err) {
       return new Response("el destino no respondió: " + err, { status: 502, headers: cors(new Headers()) });
     }
