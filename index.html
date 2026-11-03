@@ -742,7 +742,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r25-2026-11-05";
+    const BUILD_TAG = "r26-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -1064,15 +1064,17 @@
         }
       }
 
+      let rejected = false; // el servidor contestó 401/403: hay que leer el cuerpo por el worker
       if (state.corsMode === "auto" && !directTried) {
         try {
           const d = await tryDirect();
           if (!looksBlocked(d) && !retryViaOwn(d)) return d;
-          if (retryViaOwn(d)) diagLog("red", `   ↳ HTTP ${d.status} directo: se reintenta por tu proxy propio`);
+          if (retryViaOwn(d)) { rejected = true; diagLog("red", `   ↳ HTTP ${d.status} directo: se reintenta por tu proxy propio`); }
         } catch (_) {}
-        // Sonda no-cors para video: evita que los proxies se ahoguen con archivos
-        // pesados y confirma al plugin que el CDN del video sí responde.
-        if (!body && isMediaUrl(url)) {
+        // Sonda no-cors SOLO para archivos de video (.mp4, .ts...): confirma que el CDN
+        // responde, pero su cuerpo llega vacío. Una lista .m3u8/.mpd la tiene que LEER el
+        // plugin: con la sonda, CineHax+ veía "lista sin vídeo" y saltaba cada servidor.
+        if (!body && !rejected && isMediaUrl(url) && !/\.(m3u8|mpd)(\?|#|$)/i.test(url)) {
           try {
             const p = await probeMediaNoCors(url, timeoutMs);
             diagLog("red", `SONDA ${shortUrl} → no-cors → CDN alcanzable ✓`);
