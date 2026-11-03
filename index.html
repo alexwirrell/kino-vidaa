@@ -574,8 +574,71 @@
         return raw ? JSON.parse(raw) : fallback;
       } catch (e) { return fallback; }
     }
+    // El almacenamiento del TV es pequeño (~5 MB). Si se llena, antes cualquier guardado fallaba
+    // en silencio (p. ej. la lista de plugins instalados: el plugin "se instalaba" pero no quedaba).
+    // Ahora se libera espacio (cachés caducadas y cachés grandes de plugins) y se reintenta.
+    function storageFree(needBytes, cachesToo) {
+      let freed = 0;
+      try {
+        const now = Date.now(), caches = [];
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const k = localStorage.key(i);
+          if (!k || !k.startsWith("kino_pstore_")) continue;
+          const raw = localStorage.getItem(k) || "";
+          let exp = 0;
+          if (raw.charAt(0) === "{") { try { exp = Number(JSON.parse(raw).$e) || 0; } catch (_) {} }
+          if (exp && exp < now) { localStorage.removeItem(k); freed += (k.length + raw.length) * 2; }
+          else caches.push({ k, n: (k.length + raw.length) * 2 });
+        }
+        if (!cachesToo || freed >= needBytes) return freed;
+        // Cachés grandes de plugins (listas de episodios, respuestas de TMDB...): el plugin las
+        // vuelve a pedir. Las pequeñas (< 4 KB, p. ej. ids o preferencias) se conservan.
+        caches.sort((a, b) => b.n - a.n);
+        for (const c of caches) { if (freed >= needBytes || c.n < 4096) break; localStorage.removeItem(c.k); freed += c.n; }
+        if (freed < needBytes) { const h = localStorage.getItem("kino_home_cache_v1"); if (h) { localStorage.removeItem("kino_home_cache_v1"); freed += h.length * 2; } }
+      } catch (_) {}
+      return freed;
+    }
+    // Margen: con el almacenamiento casi lleno el navegador puede aceptar un guardado y descartarlo
+    // después sin avisar (visto en pruebas: la lista de plugins volvía vacía al reiniciar). Por eso
+    // las cachés de plugins se recortan antes de llegar al límite (~5 MB de texto en el TV).
+    const STORAGE_HIGH = 6 * 1024 * 1024, STORAGE_TARGET = 4 * 1024 * 1024; // bytes (texto UTF-16)
+    let headroomAt = 0;
+    function storageUsage() {
+      let used = 0, plug = 0;
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i) || "";
+          const n = (k.length + (localStorage.getItem(k) || "").length) * 2;
+          used += n; if (k.startsWith("kino_pstore_")) plug += n;
+        }
+      } catch (_) {}
+      return { used, plug };
+    }
+    function ensureStorageHeadroom(force) {
+      if (!force && Date.now() - headroomAt < 5000) return;
+      headroomAt = Date.now();
+      const u = storageUsage();
+      if (u.used > STORAGE_HIGH) {
+        const freed = storageFree(u.used - STORAGE_TARGET, true);
+        try { diagLog("info", `💾 almacenamiento casi lleno (${Math.round(u.used / 1024)} KB): se liberaron ${Math.round(freed / 1024)} KB de cachés de plugins`); } catch (_) {}
+      }
+    }
+    let storageWarned = false;
     function saveStore(key, val) {
-      try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
+      let txt;
+      try { txt = JSON.stringify(val); } catch (_) { return false; }
+      try { localStorage.setItem(key, txt); return true; } catch (e) {}
+      // Lleno: los datos de la app (plugins instalados, ajustes) pueden desplazar cachés;
+      // la caché de un plugin solo puede usar lo que ya caducó.
+      const isCache = key.startsWith("kino_pstore_");
+      const freed = storageFree(txt.length * 2 + 262144, !isCache);
+      try { localStorage.setItem(key, txt); if (freed) try { diagLog("info", `💾 almacenamiento lleno: se liberaron ${Math.round(freed / 1024)} KB de cachés`); } catch (_) {} return true; } catch (e) {}
+      if (!isCache && !storageWarned) {
+        storageWarned = true;
+        try { diagLog("error", `💾 no se pudo guardar «${key}»: el almacenamiento del TV está lleno`); } catch (_) {}
+      }
+      return false;
     }
 
     // Sin proxy propio por defecto: la dirección del worker es privada de cada
@@ -749,7 +812,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r31-2026-11-05";
+    const BUILD_TAG = "r32-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -2092,8 +2155,22 @@
         },
         rank: kinoRank,
         storage: {
-          get: function(k) { return loadStore(`kino_pstore_${pluginId}_${k}`, null); },
-          set: function(k, v) { saveStore(`kino_pstore_${pluginId}_${k}`, String(v)); },
+          // Se respeta ttlMs (kino.d.ts): lo caducado se borra al leerlo y es lo primero que se libera
+          // cuando el almacenamiento se llena (antes las cachés de los plugins crecían sin límite)
+          get: function(k) {
+            const key = `kino_pstore_${pluginId}_${k}`;
+            const v = loadStore(key, null);
+            if (v && typeof v === "object" && "$v" in v) {
+              if (v.$e && v.$e < Date.now()) { try { localStorage.removeItem(key); } catch (_) {} return null; }
+              return v.$v;
+            }
+            return v;
+          },
+          set: function(k, v, o) {
+            const ttl = o && Number(o.ttlMs) > 0 ? Number(o.ttlMs) : 0;
+            saveStore(`kino_pstore_${pluginId}_${k}`, ttl ? { $v: String(v), $e: Date.now() + ttl } : String(v));
+            ensureStorageHeadroom();
+          },
           remove: function(k) { try { localStorage.removeItem(`kino_pstore_${pluginId}_${k}`); } catch (e) {} },
           keys: function() {
             const prefix = `kino_pstore_${pluginId}_`;
@@ -2958,6 +3035,7 @@
         }
 
         const displayName = (entry.isCustom && info && info.name) || entry.name;
+        let persisted = true;
         // Puede haberse instalado por otra vía mientras se validaba
         if (!isInstalled(entry.id)) {
           state.installed.push({
@@ -2967,11 +3045,14 @@
             stremio: entry.stremio || null,
             enabled: true
           });
-          saveStore("kino_installed_v2", state.installed);
+          ensureStorageHeadroom(true);
+          persisted = saveStore("kino_installed_v2", state.installed);
         }
         updateBadges();
         renderView();
-        setStatus(`✅ ${displayName} instalado y activo · cargando su contenido en Inicio...`, { priority: true });
+        setStatus(persisted
+          ? `✅ ${displayName} instalado y activo · cargando su contenido en Inicio...`
+          : `⚠️ ${displayName} funciona, pero el TV no pudo guardarlo (almacenamiento lleno): se perderá al reiniciar`, { priority: true });
         // El Inicio se recarga en segundo plano: antes la instalación esperaba a
         // TODOS los plugins (minutos) y parecía colgada.
         refreshHomeCatalog();
@@ -6387,6 +6468,13 @@ async function handle(request) {
     }
 
     // Inicialización
+    // Uso del almacenamiento (en el Diagnóstico): si está casi lleno, los guardados fallan
+    try {
+      storageFree(0, false); // borrar cachés de plugins ya caducadas
+      ensureStorageHeadroom(true);
+      const { used, plug } = storageUsage();
+      diagLog("info", `💾 almacenamiento: ${Math.round(used / 1024)} KB usados (cachés de plugins: ${Math.round(plug / 1024)} KB)`);
+    } catch (_) {}
     // Una sola vez: borrar las respuestas de TMDB que los plugins guardaron
     // vacías mientras la app no tenía llave (si no, seguirían sin contenido)
     try {
