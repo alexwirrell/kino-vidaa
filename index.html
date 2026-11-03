@@ -814,7 +814,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r36-2026-11-05";
+    const BUILD_TAG = "r37-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -4685,6 +4685,11 @@ async function handle(request) {
       // file:"/stream/x.m3u8" relativo (jwplayer/plyr)
       const reRel = /(?:file|src|source)\s*[:=]\s*["'](\/[^"']+?\.(?:m3u8|mp4)[^"']*)["']/gi;
       while ((m = reRel.exec(text)) !== null) push(m[1]);
+      // VOE y similares: 'hls': 'aHR0cHM6Ly9...' (el enlace va en base64)
+      const reB64 = /["'](?:hls|file|source|video_link)["']\s*:\s*["']([A-Za-z0-9+\/=]{24,})["']/g;
+      while ((m = reB64.exec(text)) !== null) {
+        try { const dec = atob(m[1]); if (/^https?:\/\/\S+\.(?:m3u8|mp4)/i.test(dec)) push(dec); } catch (_) {}
+      }
       return out;
     }
 
@@ -5175,6 +5180,12 @@ async function handle(request) {
       video.style.display = "none";
       iframe.style.display = "block";
       playerUI.embedActive = true;
+      // Sin ventanas emergentes ni redirecciones de la app: los anuncios del servidor abrían
+      // pop-ups (window.open) que en el TV roban el foco del control. Filemoon/Vidhide y otros
+      // detectan el sandbox y no arrancan: a esos se les deja sin él.
+      const noSandbox = /filemoon|moonplayer|vidhide|vidhidepro|vidhideplus|dintezuvio|morencius|filelions|minochinos|kerapoxy|bysezejataos/i.test(src.url);
+      if (noSandbox) iframe.removeAttribute("sandbox");
+      else iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-presentation");
       // Sin parámetros añadidos: la URL tal cual (algunos servidores tomaban los
       // parámetros extra como señal de bot y pedían captcha)
       iframe.src = src.url;
@@ -5619,7 +5630,7 @@ async function handle(request) {
       if (Pointer.key(e)) return true; // modo puntero: flechas mueven el cursor, OK hace clic
       const k = e.key, c = e.keyCode;
       const media =
-        (k === "MediaPlayPause" || c === 10252 || c === 179) ? "toggle" :
+        (k === "MediaPlayPause" || c === 10252 || c === 179 || c === 463) ? "toggle" :
         (k === "MediaPlay" || c === 415) ? "play" :
         (k === "MediaPause" || c === 19) ? "pause" :
         (k === "MediaFastForward" || c === 417) ? "ff" :
