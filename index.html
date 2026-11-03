@@ -686,6 +686,8 @@
       storeEntries: buildUnifiedStore(KINO_SEED_PLUGINS, KINO_COMMUNITY_STORE),
       installed: loadStore("kino_installed_v2", DEFAULT_INSTALLED),
       pluginConfigs: loadStore("kino_plugin_configs", {}),
+      // Valores propios de los secretos de un plugin (los sellados de Kino no se pueden leer)
+      pluginSecrets: loadStore("kino_plugin_secrets", {}),
       loadedModules: {}, // id -> { manifest, exports }
       homeRows: [], // se llena con la caché al iniciar (ver loadHomeCache)
       pluginStatus: loadStore("kino_plugin_status", {}),
@@ -713,7 +715,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r16-2026-11-04";
+    const BUILD_TAG = "r17-2026-11-04";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -728,7 +730,25 @@
     }
 
     // Registro de diagnóstico visible en la TV (la app corre sin consola F12)
+    // El registro nunca muestra secretos: valores propios de plugins, la llave de
+    // TMDB ni la clave del proxy propio (defensa adicional, aunque no deberían llegar)
+    function redactSecrets(text) {
+      let t = String(text);
+      const vals = [];
+      try {
+        Object.values(state.pluginSecrets || {}).forEach(o => Object.values(o || {}).forEach(v => vals.push(String(v))));
+        if (state.tmdbKey) vals.push(state.tmdbKey);
+        const k = /[?&]key=([^&]+)/.exec(state.customProxy || "");
+        if (k) vals.push(decodeURIComponent(k[1]));
+      } catch (_) {}
+      vals.filter(v => v && v.length >= 4).forEach(v => {
+        t = t.split(v).join("•••");
+        try { const e = encodeURIComponent(v); if (e !== v) t = t.split(e).join("•••"); } catch (_) {}
+      });
+      return t;
+    }
     function diagLog(kind, msg) {
+      msg = redactSecrets(msg);
       const d = new Date();
       const hh = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") + ":" + String(d.getSeconds()).padStart(2, "0");
       state.diagLog.push({ t: hh, kind: kind || "info", msg: String(msg) });
@@ -945,7 +965,7 @@
         }
       });
 
-      const shortUrl = (() => { try { const u = new URL(url); return (u.host + u.pathname).slice(0, 70); } catch (_) { return url.slice(0, 70); } })();
+      const shortUrl = (() => { const lu = options.logUrl || url; try { const u = new URL(lu); return (u.host + u.pathname).slice(0, 70); } catch (_) { return String(lu).slice(0, 70); } })();
 
       const tryDirect = async () => {
         const t0 = Date.now();
@@ -986,9 +1006,14 @@
       const proxies = [];
       if (state.customProxy) proxies.push(state.customProxy);
       if (state.lastGoodProxy && !proxies.includes(state.lastGoodProxy)) proxies.push(state.lastGoodProxy);
-      ["https://api.codetabs.com/v1/proxy?quest=",
-       "https://api.allorigins.win/raw?url=",
-       "https://api.cors.lol/?url="].forEach(p => { if (!proxies.includes(p)) proxies.push(p); });
+      if (!options.noPublicProxy) {
+        ["https://api.codetabs.com/v1/proxy?quest=",
+         "https://api.allorigins.win/raw?url=",
+         "https://api.cors.lol/?url="].forEach(p => { if (!proxies.includes(p)) proxies.push(p); });
+      } else {
+        // Con un secreto: solo directo o por el proxy propio
+        for (let i = proxies.length - 1; i >= 0; i--) if (proxies[i] !== state.customProxy) proxies.splice(i, 1);
+      }
 
       if (state.corsMode === "direct" || isLikelyCorsFriendly(url)) {
         try {
@@ -1518,7 +1543,118 @@
         const ct = ctrStream(ks, ctr, data, true);
         return concat(ct, xor16(encBlock(ks, J0), ghash(H, aad, ct)));
       }
+      // ---------- DES / 3DES (des-ede3: cifra con K1, descifra con K2, cifra con K3) ----------
+      const DES_IP = [58,50,42,34,26,18,10,2,60,52,44,36,28,20,12,4,62,54,46,38,30,22,14,6,64,56,48,40,32,24,16,8,57,49,41,33,25,17,9,1,59,51,43,35,27,19,11,3,61,53,45,37,29,21,13,5,63,55,47,39,31,23,15,7];
+      const DES_FP = [40,8,48,16,56,24,64,32,39,7,47,15,55,23,63,31,38,6,46,14,54,22,62,30,37,5,45,13,53,21,61,29,36,4,44,12,52,20,60,28,35,3,43,11,51,19,59,27,34,2,42,10,50,18,58,26,33,1,41,9,49,17,57,25];
+      const DES_E = [32,1,2,3,4,5,4,5,6,7,8,9,8,9,10,11,12,13,12,13,14,15,16,17,16,17,18,19,20,21,20,21,22,23,24,25,24,25,26,27,28,29,28,29,30,31,32,1];
+      const DES_P = [16,7,20,21,29,12,28,17,1,15,23,26,5,18,31,10,2,8,24,14,32,27,3,9,19,13,30,6,22,11,4,25];
+      const DES_PC1 = [57,49,41,33,25,17,9,1,58,50,42,34,26,18,10,2,59,51,43,35,27,19,11,3,60,52,44,36,63,55,47,39,31,23,15,7,62,54,46,38,30,22,14,6,61,53,45,37,29,21,13,5,28,20,12,4];
+      const DES_PC2 = [14,17,11,24,1,5,3,28,15,6,21,10,23,19,12,4,26,8,16,7,27,20,13,2,41,52,31,37,47,55,30,40,51,45,33,48,44,49,39,56,34,53,46,42,50,36,29,32];
+      const DES_SHIFTS = [1,1,2,2,2,2,2,2,1,2,2,2,2,2,2,1];
+      const DES_S = [
+        [14,4,13,1,2,15,11,8,3,10,6,12,5,9,0,7,0,15,7,4,14,2,13,1,10,6,12,11,9,5,3,8,4,1,14,8,13,6,2,11,15,12,9,7,3,10,5,0,15,12,8,2,4,9,1,7,5,11,3,14,10,0,6,13],
+        [15,1,8,14,6,11,3,4,9,7,2,13,12,0,5,10,3,13,4,7,15,2,8,14,12,0,1,10,6,9,11,5,0,14,7,11,10,4,13,1,5,8,12,6,9,3,2,15,13,8,10,1,3,15,4,2,11,6,7,12,0,5,14,9],
+        [10,0,9,14,6,3,15,5,1,13,12,7,11,4,2,8,13,7,0,9,3,4,6,10,2,8,5,14,12,11,15,1,13,6,4,9,8,15,3,0,11,1,2,12,5,10,14,7,1,10,13,0,6,9,8,7,4,15,14,3,11,5,2,12],
+        [7,13,14,3,0,6,9,10,1,2,8,5,11,12,4,15,13,8,11,5,6,15,0,3,4,7,2,12,1,10,14,9,10,6,9,0,12,11,7,13,15,1,3,14,5,2,8,4,3,15,0,6,10,1,13,8,9,4,5,11,12,7,2,14],
+        [2,12,4,1,7,10,11,6,8,5,3,15,13,0,14,9,14,11,2,12,4,7,13,1,5,0,15,10,3,9,8,6,4,2,1,11,10,13,7,8,15,9,12,5,6,3,0,14,11,8,12,7,1,14,2,13,6,15,0,9,10,4,5,3],
+        [12,1,10,15,9,2,6,8,0,13,3,4,14,7,5,11,10,15,4,2,7,12,9,5,6,1,13,14,0,11,3,8,9,14,15,5,2,8,12,3,7,0,4,10,1,13,11,6,4,3,2,12,9,5,15,10,11,14,1,7,6,0,8,13],
+        [4,11,2,14,15,0,8,13,3,12,9,7,5,10,6,1,13,0,11,7,4,9,1,10,14,3,5,12,2,15,8,6,1,4,11,13,12,3,7,14,10,15,6,8,0,5,9,2,6,11,13,8,1,4,10,7,9,5,0,15,14,2,3,12],
+        [13,2,8,4,6,15,11,1,10,9,3,14,5,0,12,7,1,15,13,8,10,3,7,4,12,5,6,11,0,14,9,2,7,11,4,1,9,12,14,2,0,6,10,13,15,3,5,8,2,1,14,7,4,10,8,13,15,12,9,0,3,5,6,11]];
+      // Versión rápida: S-cajas combinadas con la permutación P (enteros de 32 bits,
+      // sin crear arreglos por ronda); verificada byte a byte contra OpenSSL
+      const bitOf = (hi, lo, pos) => pos < 32 ? (hi >>> (31 - pos)) & 1 : (lo >>> (63 - pos)) & 1; // pos 0..63
+      function perm64(hi, lo, table) {
+        let oh = 0, ol = 0;
+        for (let i = 0; i < table.length; i++) {
+          const b = bitOf(hi, lo, table[i] - 1);
+          if (i < 32) oh |= b << (31 - i); else ol |= b << (63 - i);
+        }
+        return [oh, ol];
+      }
+      const SP = DES_S.map((box, j) => {
+        const t = new Int32Array(64);
+        for (let v = 0; v < 64; v++) {
+          const n = box[(((v >> 5) & 1) << 1 | (v & 1)) * 16 + ((v >> 1) & 15)];
+          const pre = n << (28 - j * 4); // los 4 bits de la S-caja j en su lugar (MSB = bit 1)
+          let out = 0;
+          for (let i = 0; i < 32; i++) if ((pre >>> (32 - DES_P[i])) & 1) out |= 1 << (31 - i);
+          t[v] = out;
+        }
+        return t;
+      });
+      function desSubkeys(key8) {
+        // PC1 sobre 64 bits → C y D de 28 bits → 16 subclaves de 8 bloques de 6 bits
+        const hi = (key8[0] << 24 | key8[1] << 16 | key8[2] << 8 | key8[3]) | 0, lo = (key8[4] << 24 | key8[5] << 16 | key8[6] << 8 | key8[7]) | 0;
+        let C = 0, D = 0;
+        for (let i = 0; i < 28; i++) C |= bitOf(hi, lo, DES_PC1[i] - 1) << (27 - i);
+        for (let i = 0; i < 28; i++) D |= bitOf(hi, lo, DES_PC1[28 + i] - 1) << (27 - i);
+        const keys = [];
+        for (let r = 0; r < 16; r++) {
+          for (let k = 0; k < DES_SHIFTS[r]; k++) { C = ((C << 1) | (C >>> 27)) & 0x0fffffff; D = ((D << 1) | (D >>> 27)) & 0x0fffffff; }
+          const sk = new Uint8Array(8);
+          for (let i = 0; i < 48; i++) {
+            const pos = DES_PC2[i] - 1;
+            const bit = pos < 28 ? (C >>> (27 - pos)) & 1 : (D >>> (55 - pos)) & 1;
+            sk[i / 6 | 0] |= bit << (5 - (i % 6));
+          }
+          keys.push(sk);
+        }
+        return keys;
+      }
+      function desBlock(block8, subkeys, decrypting) {
+        let [L, R] = perm64((block8[0] << 24 | block8[1] << 16 | block8[2] << 8 | block8[3]) | 0, (block8[4] << 24 | block8[5] << 16 | block8[6] << 8 | block8[7]) | 0, DES_IP);
+        for (let r = 0; r < 16; r++) {
+          const K = subkeys[decrypting ? 15 - r : r];
+          let f = 0;
+          for (let j = 0; j < 8; j++) {
+            let v = 0;
+            for (let t = 0; t < 6; t++) v |= ((R >>> (32 - DES_E[j * 6 + t])) & 1) << (5 - t);
+            f |= SP[j][v ^ K[j]];
+          }
+          const nr = L ^ f; L = R; R = nr;
+        }
+        const [oh, ol] = perm64(R, L, DES_FP);
+        return new Uint8Array([oh >>> 24, oh >>> 16 & 255, oh >>> 8 & 255, oh & 255, ol >>> 24, ol >>> 16 & 255, ol >>> 8 & 255, ol & 255]);
+      }
+      function des3(alg, o, decrypting) {
+        const mode = /cbc$/i.test(alg) ? "cbc" : "ecb";
+        const key = decode(o.key, o.keyEncoding || "utf8");
+        if (key.length !== 24 && key.length !== 16) throw fail("invalid key length");
+        const k1 = desSubkeys(key.subarray(0, 8)), k2 = desSubkeys(key.subarray(8, 16)), k3 = desSubkeys(key.length === 24 ? key.subarray(16, 24) : key.subarray(0, 8));
+        const iv = mode === "cbc" ? decode(o.iv, o.ivEncoding || "utf8") : null;
+        if (mode === "cbc" && (!iv || iv.length !== 8)) throw fail("invalid iv length");
+        const data = decode(o.data, o.inputEncoding || (decrypting ? "base64" : "utf8"));
+        const pad = (o.padding || "pkcs7") !== "none";
+        let input = data;
+        if (!decrypting && pad) { const n = 8 - (data.length % 8); input = concat(data, new Uint8Array(n).fill(n)); }
+        if (input.length % 8) throw fail("data length is not a multiple of 8");
+        const out = new Uint8Array(input.length);
+        let prev = iv;
+        for (let off = 0; off < input.length; off += 8) {
+          const blk = input.subarray(off, off + 8);
+          if (decrypting) {
+            let p = desBlock(desBlock(desBlock(blk, k3, true), k2, false), k1, true);
+            if (mode === "cbc") { for (let i = 0; i < 8; i++) p[i] ^= prev[i]; prev = blk.slice(); }
+            out.set(p, off);
+          } else {
+            const x = blk.slice();
+            if (mode === "cbc") for (let i = 0; i < 8; i++) x[i] ^= prev[i];
+            const c = desBlock(desBlock(desBlock(x, k1, false), k2, true), k3, false);
+            if (mode === "cbc") prev = c;
+            out.set(c, off);
+          }
+        }
+        let res = out;
+        if (decrypting && pad) {
+          const n = out[out.length - 1];
+          if (!n || n > 8 || n > out.length) throw fail("bad decrypt");
+          for (let i = out.length - n; i < out.length; i++) if (out[i] !== n) throw fail("bad decrypt");
+          res = out.subarray(0, out.length - n);
+        }
+        return encode(res, o.outputEncoding || (decrypting ? "utf8" : "base64"));
+      }
       function cipher(alg, o, decrypting) {
+        if (/^des-ede3(-cbc|-ecb)?$/i.test(String(alg || ""))) return des3(String(alg), o, decrypting);
         const m = /^aes-(128|192|256)-(cbc|ecb|ctr|gcm)$/i.exec(String(alg || ""));
         if (!m) throw fail("unsupported cipher: " + alg);
         const key = decode(o.key, o.keyEncoding || "utf8");
@@ -1730,7 +1866,70 @@
       return ans;
     }
 
-    function createKinoEnv(pluginId) {
+    // ---------------------------------------------------------------------
+    // kino.secret (kino.d.ts): devuelve un MARCADOR; la app lo cambia por el
+    // valor en kino.fetch (solo hacia los dominios del manifiesto, nunca por
+    // proxies públicos y nunca en el registro) y en kino.crypto cuando el
+    // secreto es una llave de cifrado ("use": "cipher-key").
+    // Los valores sellados ("kino-sealed:v1:...") están cifrados con una llave
+    // que solo tiene la app Kino oficial: no se descifran. La persona puede
+    // escribir su propio valor en ⚙️ Configurar del plugin.
+    // ---------------------------------------------------------------------
+    function makeSecretBox(pluginId, manifest) {
+      const declared = (manifest && manifest.secrets && typeof manifest.secrets === "object") ? manifest.secrets : {};
+      const names = Object.keys(declared);
+      const tok = Math.random().toString(36).slice(2, 10);
+      const markerOf = name => `kinosecret_${tok}_${names.indexOf(name)}_x`;
+      const markerRe = new RegExp(`kinosecret_${tok}_(\\d+)_x`, "g");
+      const specOf = name => { const d = declared[name]; return (d && typeof d === "object") ? d : { seal: d }; };
+      const valueOf = name => {
+        const v = ((state.pluginSecrets[pluginId] || {})[name] || "").trim();
+        if (v) return v;
+        const sealed = /^kino-sealed:/.test(String(specOf(name).seal || ""));
+        const e = new Error(`secret ${name} sin valor`);
+        e.code = "unavailable";
+        e.userMessage = sealed
+          ? `Este plugin usa una llave sellada («${name}») que solo tiene la app Kino oficial. Si tienes tu propio valor, escríbelo en ⚙️ Configurar del plugin.`
+          : `Falta el secreto «${name}»: escríbelo en ⚙️ Configurar del plugin.`;
+        throw e;
+      };
+      const hostAllowed = host => {
+        const hosts = Array.isArray(manifest && manifest.hosts) ? manifest.hosts : [];
+        host = String(host || "").toLowerCase();
+        return hosts.some(h => { h = String(h).toLowerCase(); if (h.startsWith("*.")) h = h.slice(2); return host === h || host.endsWith("." + h); });
+      };
+      return {
+        names,
+        has: str => typeof str === "string" && names.length > 0 && str.indexOf(`kinosecret_${tok}_`) >= 0,
+        marker(name) {
+          if (!names.includes(name)) { const e = new Error(`secret no declarado en el manifiesto: ${name}`); e.code = "invalid_request"; throw e; }
+          return markerOf(name);
+        },
+        // Sustituye en texto destinado a `url` (comprueba el dominio y que no sea una llave de cifrado)
+        fill(str, url) {
+          return String(str).replace(markerRe, (m, i) => {
+            const name = names[Number(i)];
+            if (specOf(name).use === "cipher-key") { const e = new Error(`${name} es una llave de cifrado: no se envía por la red`); e.code = "invalid_request"; throw e; }
+            let host = "";
+            try { host = new URL(url).hostname; } catch (_) {}
+            if (!/^https:/i.test(url) || !hostAllowed(host)) { const e = new Error(`un secreto solo puede ir a los dominios del plugin por https (no a ${host})`); e.code = "host_not_allowed"; throw e; }
+            return valueOf(name);
+          });
+        },
+        // Llave de kino.crypto: el marcador completo de un secreto "cipher-key"
+        cipherKey(o) {
+          if (!o || typeof o.key !== "string") return o;
+          const m = new RegExp(`^kinosecret_${tok}_(\\d+)_x$`).exec(o.key);
+          if (!m) { if (this.has(o.key)) { const e = new Error("un secreto solo puede ser la llave completa"); e.code = "crypto_error"; throw e; } return o; }
+          const name = names[Number(m[1])], spec = specOf(name);
+          if (spec.use !== "cipher-key") { const e = new Error(`${name} no es una llave de cifrado`); e.code = "crypto_error"; throw e; }
+          return Object.assign({}, o, { key: valueOf(name), keyEncoding: spec.encoding || "utf8" });
+        }
+      };
+    }
+
+    function createKinoEnv(pluginId, manifest) {
+      const secrets = makeSecretBox(pluginId, manifest);
       return {
         apiVersion: 15,
         appVersion: "0.9.79",
@@ -1740,6 +1939,18 @@
         screen: { widgets: [], names: [], version: 1 },
         fetch: async function(url, opts = {}) {
           const o = Object.assign({}, opts);
+          // Secretos: sustituir el marcador por su valor (solo dominios del plugin, https)
+          const withSecret = secrets.has(String(url)) || secrets.has(JSON.stringify(o.headers || {})) || secrets.has(typeof o.body === "string" ? o.body : JSON.stringify(o.body || ""));
+          if (withSecret) {
+            const target = String(url).replace(/kinosecret_[a-z0-9]+_\d+_x/g, "x");
+            o.logUrl = String(url).replace(/kinosecret_[a-z0-9]+_\d+_x/g, "•••"); // nunca el valor en el registro
+            url = secrets.fill(String(url), target);
+            if (o.headers) { const h = {}; Object.keys(o.headers).forEach(k => { h[k] = secrets.fill(String(o.headers[k]), target); }); o.headers = h; }
+            if (typeof o.body === "string") o.body = secrets.fill(o.body, target);
+            else if (o.body && o.body.json !== undefined) o.body = { json: JSON.parse(secrets.fill(JSON.stringify(o.body.json), target).replace(/[\u0000-\u001f]/g, "")) };
+            else if (o.body && o.body.form) { const f = {}; Object.keys(o.body.form).forEach(k => { f[k] = secrets.fill(String(o.body.form[k]), target); }); o.body = { form: f }; }
+            o.noPublicProxy = true; // un secreto nunca viaja por proxies públicos
+          }
           if (o.timeoutMs) o.timeoutMs = Math.min(30000, Math.max(1000, Number(o.timeoutMs) || 15000));
           const r = await smartFetch(url, o);
           let text = r.text || "";
@@ -1852,10 +2063,12 @@
           get: function() { return null; },
           clear: function() {}
         },
-        crypto: KinoCrypto,
+        crypto: Object.assign({}, KinoCrypto, {
+          encrypt: (alg, o) => KinoCrypto.encrypt(alg, secrets.cipherKey(o)),
+          decrypt: (alg, o) => KinoCrypto.decrypt(alg, secrets.cipherKey(o))
+        }),
         meta: Object.assign(function(q) { return kinoMeta(q); }, { byTitle: true }),
-        // Kino reemplaza el marcador por el valor del secreto del manifiesto; aquí no hay secretos sellados
-        secret: function(name) { diagLog(pluginId, `⚠️ kino.secret("${name}") no está disponible en esta app`); return ""; },
+        secret: function(name) { return secrets.marker(String(name)); },
         // Sin llave se lanza un error (como Kino): antes devolvía "0 resultados" y
         // plugins como YojaTV guardaban ese vacío y su Inicio salía en blanco
         tmdb: async function(path, params = {}) {
@@ -2003,7 +2216,7 @@
 
       // Un solo entorno `kino` por plugin: el que ve el módulo al compilarse es el
       // mismo que se reactiva en cada llamada (storage/config coherentes).
-      const env = createKinoEnv(id);
+      const env = createKinoEnv(id, manifest);
       globalThis.kino = env;
       // No inyectar la declaración si el propio plugin ya declara `kino`
       const declaresKino = /(^|\n)\s*(?:const|let|var)\s+kino\b/.test(code);
@@ -2072,7 +2285,7 @@
         globalThis.kino = mod.env;
         const res = await mod.exports[fnName](...args);
         const secs = ((Date.now() - t0) / 1000).toFixed(1);
-        const size = Array.isArray(res) ? res.length + " ítems" : (res && typeof res === "object" ? Object.keys(res).length + " campos" : String(res));
+        const size = Array.isArray(res) ? res.length + " ítems" : (res && typeof res === "object" ? Object.keys(res).length + " campos" : typeof res === "string" ? `texto de ${res.length} caracteres` : String(res));
         diagLog("plugin", `${pluginEntry.id}.${fnName}(${argHint}) → ${size} (${secs}s)`);
         return res;
       } catch (e) {
@@ -2813,6 +3026,25 @@
           `;
           box.appendChild(row);
         });
+      }
+      // Secretos del manifiesto: valores propios (los sellados de Kino no se pueden leer)
+      const secretSpec = pluginMod && pluginMod.manifest && pluginMod.manifest.secrets && typeof pluginMod.manifest.secrets === "object" ? pluginMod.manifest.secrets : null;
+      if (secretSpec && Object.keys(secretSpec).length) {
+        const mine = state.pluginSecrets[entry.id] || {};
+        const sec = document.createElement("div");
+        sec.style.cssText = "margin-top:16px; padding-top:12px; border-top:1px solid var(--border);";
+        sec.innerHTML = `<div style="font-size:14px; font-weight:700; margin-bottom:4px;">🔑 Secretos del plugin</div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:10px; line-height:1.5;">Este plugin trae llaves <b>selladas</b> que solo puede leer la app Kino oficial. Si tienes tus propios valores, escríbelos aquí: se guardan solo en este TV y solo se envían a los sitios del plugin.</div>`;
+        Object.keys(secretSpec).slice(0, 10).forEach(name => {
+          const d = secretSpec[name];
+          const kind = d && typeof d === "object" && d.use === "cipher-key" ? ` (llave de cifrado${d.encoding ? ", " + d.encoding : ""})` : "";
+          const row = document.createElement("div");
+          row.style.marginBottom = "10px";
+          row.innerHTML = `<label style="display:block; font-size:13px; color:var(--muted); margin-bottom:5px;">${name}${kind}${mine[name] ? " · ✓ guardado" : " · sin valor"}</label>
+            <input class="tv-input focusable" type="password" data-secret-key="${name}" value="" placeholder="${mine[name] ? "(guardado: escribe para cambiarlo)" : "Tu propio valor"}" style="width:100%;" />`;
+          sec.appendChild(row);
+        });
+        box.appendChild(sec);
       }
     }
 
@@ -4949,6 +5181,14 @@ export default {
           state.pluginConfigs[p.id][inp.dataset.cfgKey] = inp.value.trim();
         });
         saveStore("kino_plugin_configs", state.pluginConfigs);
+        // Secretos: solo se cambian los que se escribieron (vacío = conservar)
+        document.querySelectorAll("#configFieldsBox [data-secret-key]").forEach(inp => {
+          const v = inp.value.trim();
+          if (!v) return;
+          state.pluginSecrets[p.id] = state.pluginSecrets[p.id] || {};
+          state.pluginSecrets[p.id][inp.dataset.secretKey] = v;
+        });
+        saveStore("kino_plugin_secrets", state.pluginSecrets);
         delete state.loadedModules[p.id];
         setStatus(`Configuración guardada para ${p.name}`);
       }
