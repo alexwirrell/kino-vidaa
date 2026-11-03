@@ -474,7 +474,7 @@
 
   <!-- Reproductor de Video (HTML5 directo o iframe de servidores embed) -->
   <div class="overlay mode-video" id="playerOverlay">
-    <video id="videoPlayer" autoplay playsinline></video>
+    <video id="videoPlayer" playsinline></video>
     <iframe id="webPlayerFrame" tabindex="-1" style="display:none;" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>
     <div class="player-osd" id="playerOsd"></div>
     <div class="player-hud" id="playerHud">
@@ -1525,6 +1525,10 @@
             state.selectedEpisode = eNum;
             state.activeSources = getSourcesForTitle(imdb, item.title, true, sNum, eNum);
             renderEmbedSources(item);
+            // Enlaces del episodio anterior ya no valen
+            state.directStreams = [];
+            document.getElementById("directStreamsList").innerHTML = "";
+            state.extractSearch = { item, promise: extractAllEmbeds(item) };
             setStatus(`Servidores actualizados para T${sNum}:E${eNum}`);
           });
           epGrid.appendChild(b);
@@ -2875,6 +2879,8 @@
       if (!item.video && !(item.pluginId && item.ref && !item.stremioBase) && item.kind !== "series" && item.kind !== "live") {
         findDirectStreams(item);
       }
+      // Y sacar el video de las páginas embed (para no depender de su botón ▶)
+      if (state.activeSources.some(x => x.type === "embed")) state.extractSearch = { item, promise: extractAllEmbeds(item) };
 
       const inst = state.installed.find(x => x.id === item.pluginId);
       // 1. Si viene de un plugin de GitHub, pedir details(ref) y episodes(ref)
@@ -2952,7 +2958,8 @@
     function findDirectStreams(item, opts = {}) {
       const run = ++directRun;
       const title = item.title;
-      state.directStreams = [];
+      // Conservar lo ya extraído de los servidores embed de esta misma ficha
+      state.directStreams = state.selectedItem === item ? (state.directStreams || []).filter(d => d.extracted) : [];
       const failures = [];
       const plugins = state.installed.filter(i => i.address && i.enabled !== false);
       const box = document.getElementById("directStreamsList");
@@ -3033,6 +3040,107 @@
       return prefix + encodeURIComponent(url);
     }
 
+    // =========================================================================
+    // EXTRACTOR DE VIDEO DE SERVIDORES EMBED
+    // El botón ▶ de una página embed solo se pulsa con puntero (el control
+    // remoto no llega dentro del iframe). Aquí se descarga esa página, se
+    // desempaquetan sus scripts (formato "p,a,c,k,e,d", el más común en
+    // streamwish/filemoon/vidhide...) y se busca el .m3u8/.mp4 para reproducirlo
+    // en el reproductor propio, que sí se controla con el mando.
+    // =========================================================================
+    function unpackPacker(src) {
+      const m = /}\s*\(\s*'((?:[^'\\]|\\.)*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:[^'\\]|\\.)*)'\.split\('\|'\)/.exec(src);
+      if (!m) return null;
+      let p = m[1].replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+      const a = Number(m[2]);
+      let c = Number(m[3]);
+      const k = m[4].split("|");
+      const enc = n => (n < a ? "" : enc(Math.floor(n / a))) + ((n = n % a) > 35 ? String.fromCharCode(n + 29) : n.toString(36));
+      const dict = {};
+      while (c--) dict[enc(c)] = k[c] || enc(c);
+      return p.replace(/\b\w+\b/g, w => (dict[w] !== undefined ? dict[w] : w));
+    }
+
+    function findMediaUrls(text, baseUrl) {
+      const out = [];
+      const seen = new Set();
+      const push = raw => {
+        let u = String(raw).replace(/\\\//g, "/").replace(/&amp;/g, "&");
+        try { u = new URL(u, baseUrl).href; } catch (_) { return; }
+        if (seen.has(u) || /\.(js|css|png|jpe?g|gif|svg|vtt|srt)(\?|$)/i.test(u)) return;
+        seen.add(u);
+        out.push({ url: u, mime: /\.mp4(\?|#|$)/i.test(u) ? "video/mp4" : "application/vnd.apple.mpegurl" });
+      };
+      const re = /(?:https?:)?\\?\/\\?\/[^"'<>\s\\]+?\.(?:m3u8|mp4)(?:\?[^"'<>\s\\]*)?/gi;
+      let m;
+      while ((m = re.exec(text)) !== null) push(m[0].startsWith("//") || m[0].startsWith("\\/") ? "https:" + m[0] : m[0]);
+      // file:"/stream/x.m3u8" relativo (jwplayer/plyr)
+      const reRel = /(?:file|src|source)\s*[:=]\s*["'](\/[^"']+?\.(?:m3u8|mp4)[^"']*)["']/gi;
+      while ((m = reRel.exec(text)) !== null) push(m[1]);
+      return out;
+    }
+
+    function findChildFrames(text, baseUrl) {
+      const out = [];
+      const re = /<iframe[^>]+?(?:data-src|src)\s*=\s*["']([^"']+)["']/gi;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        let u = m[1].trim();
+        if (!u || /^(about:|javascript:|data:)/i.test(u)) continue;
+        if (u.startsWith("//")) u = "https:" + u;
+        try { u = new URL(u, baseUrl).href; } catch (_) { continue; }
+        if (!out.includes(u)) out.push(u);
+      }
+      return out;
+    }
+
+    async function extractFromEmbed(url, depth = 0, deadline = Date.now() + 20000) {
+      if (Date.now() > deadline) return [];
+      let r;
+      try { r = await smartFetch(url, { timeoutMs: Math.min(12000, Math.max(2000, deadline - Date.now())) }); } catch (_) { return []; }
+      if (!r || !r.ok || !r.text || looksBlocked(r)) return [];
+      let text = r.text;
+      // Desempaquetar cada bloque eval(function(p,a,c,k,e,d){...})
+      const packedRe = /eval\(function\(p,a,c,k,e,[dr]\)[\s\S]+?\.split\('\|'\)[^)]*\)\)/g;
+      let pm;
+      while ((pm = packedRe.exec(r.text)) !== null) {
+        const un = unpackPacker(pm[0]);
+        if (un) text += "\n" + un;
+      }
+      const media = findMediaUrls(text, url);
+      if (media.length) {
+        diagLog("extractor", `✓ ${media.length} video(s) en ${url.slice(0, 70)}`);
+        return media.map(x => Object.assign(x, { referer: url }));
+      }
+      if (depth >= 2) return [];
+      const frames = findChildFrames(r.text, url).slice(0, 6);
+      const results = await Promise.all(frames.map(f => extractFromEmbed(f, depth + 1, deadline)));
+      return [].concat(...results);
+    }
+
+    // Prueba todos los servidores embed del título a la vez y agrega lo que
+    // encuentre a los enlaces directos de la ficha.
+    let extractRun = 0;
+    function extractAllEmbeds(item) {
+      const run = ++extractRun;
+      const embeds = state.activeSources.filter(x => x.type === "embed");
+      if (!embeds.length) return Promise.resolve([]);
+      const found = [];
+      return Promise.all(embeds.map(async src => {
+        const media = await extractFromEmbed(src.url);
+        if (run !== extractRun || state.selectedItem !== item) return;
+        media.slice(0, 2).forEach(mv => {
+          if ((state.directStreams || []).some(d => d.url === mv.url)) return;
+          const entry = { url: mv.url, label: `${src.name} · extraído`, mime: mv.mime, extracted: true };
+          found.push(entry);
+          state.directStreams.push(entry);
+        });
+        if (found.length && document.getElementById("detailOverlay").classList.contains("open")) {
+          renderStreamOptions(state.directStreams, item.title, { pending: true });
+        }
+      })).then(() => found);
+    }
+
     // Reproduce una "fuente" de la ficha (embed en iframe o URL directa en <video>)
     function startPlaybackSource(src, title) {
       if (!src) { setStatus("No hay un servidor seleccionado para reproducir"); return; }
@@ -3065,6 +3173,35 @@
       playerUI.embedActive = true;
       iframe.src = withAutoplay(src.url);
       playerUI.show(true);
+      // Mientras tanto, intentar sacar el video de esa página: si sale, se pasa
+      // solo al reproductor propio (con Pausa/Play/⏩/⏪ desde el mando)
+      const url = src.url;
+      playerUI.osd("⏳ Buscando el video para controlarlo con el mando...");
+      extractFromEmbed(url).then(media => {
+        if (!playerUI.isOpen() || !playerUI.isEmbed() || state.activeVideoUrl !== url) return;
+        if (!media.length) {
+          playerUI.osd("Este servidor solo se reproduce con puntero: 🔄 Siguiente o 🌐 Navegador TV");
+          return;
+        }
+        playerUI.osd("⚡ Video encontrado: ya se controla con el mando");
+        startPlayback(media[0].url, `${title || "Reproduciendo"} — ${src.name}`, { mime: media[0].mime });
+      });
+    }
+
+    // Algunos TV bloquean el arranque automático con sonido: entonces se avisa y
+    // el foco queda en ▶ Play, para que un OK lo inicie.
+    function tryAutoplay(video) {
+      const p = video.play();
+      if (p && typeof p.catch === "function") {
+        p.catch(err => {
+          // AbortError: se cambió de video · NotSupportedError/error: el enlace falló (lo avisa retryViaProxy)
+          if (!playerUI.isOpen() || video.error || (err && (err.name === "AbortError" || err.name === "NotSupportedError"))) return;
+          diagLog("player", `El TV no dejó arrancar solo (${err && err.name}): esperando OK`);
+          playerUI.updatePlayLabel();
+          playerUI.show(true);
+          playerUI.osd("▶ Pulsa OK para reproducir");
+        });
+      }
     }
 
     function startPlayback(url, title, opts = {}) {
@@ -3089,8 +3226,14 @@
       let retried = !!opts.viaProxy;
 
       const retryViaProxy = () => {
+        const err = video.error;
+        diagLog("player", `Error de video${err ? " (código " + err.code + ")" : ""} en ${String(url).slice(0, 80)}${retried ? "" : " → reintento vía proxy"}`);
         if (retried) {
-          setStatus("No se pudo reproducir ni directo ni vía proxy — prueba 🟡 Nativo VIDAA");
+          setStatus("No se pudo reproducir ni directo ni vía proxy — prueba 🔄 Siguiente o 🟡 Nativo VIDAA", { priority: true });
+          document.getElementById("nowPlayingSub").textContent = "✗ Este enlace no se pudo reproducir en el TV · 🔄 Siguiente para probar otro";
+          playerUI.osd("✗ No se pudo reproducir este enlace");
+          playerUI.show(false);
+          playerUI.el("playerNextServerBtn").focus();
           return;
         }
         retried = true;
@@ -3104,14 +3247,14 @@
         const hls = new Hls({ manifestLoadingTimeOut: 20000, fragLoadingTimeOut: 20000 });
         hls.loadSource(url);
         hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+        hls.on(Hls.Events.MANIFEST_PARSED, () => tryAutoplay(video));
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (data && data.fatal) retryViaProxy();
         });
         state.hlsInstance = hls;
       } else {
         video.src = url;
-        video.play().catch(() => {});
+        tryAutoplay(video);
       }
       // Foco en Pausa/Play (antes en Cerrar: un OK de más cerraba el video)
       playerUI.show(true);
@@ -3311,11 +3454,18 @@
         if (first) startPlayback(first.url, `${it.title} (${first.label})`, { mime: first.mime });
         return;
       }
-      // 3. Si la búsqueda de enlaces directos sigue en curso, esperarla un poco
-      const ds = state.directSearch;
-      if (ds && ds.item === it) {
-        setStatus("Buscando un enlace directo (máx. 12 s)...");
-        await Promise.race([ds.promise, new Promise(r => setTimeout(r, 12000))]);
+      // 3. Esperar (máx. 15 s) a que la búsqueda en plugins o el extractor de
+      //    los servidores embed den un enlace directo, controlable con el mando
+      const pend = [state.directSearch, state.extractSearch].filter(x => x && x.item === it).map(x => x.promise);
+      if (pend.length) {
+        setStatus("⏳ Buscando un video que se pueda controlar con el mando (máx. 15 s)...", { priority: true });
+        const allDone = Promise.all(pend);
+        const t0 = Date.now();
+        while (Date.now() - t0 < 15000) {
+          if ((state.directStreams || []).some(x => x.url)) break;
+          const finished = await Promise.race([allDone.then(() => true), new Promise(r => setTimeout(() => r(false), 300))]);
+          if (finished) break;
+        }
         if (state.selectedItem !== it || playerUI.isOpen()) return;
         if (playDirect()) return;
       }
@@ -3613,7 +3763,7 @@
         }
         // En horizontal solo se vale la misma fila (o casi): al final de una
         // fila, ▶ ya no salta a un botón de otra fila.
-        if (!vertical && orthGap > 24) return;
+        if (!vertical && orthGap > 0) return;
         // Lo que está alineado (en la misma fila/columna) gana a lo que está en diagonal
         const score = Math.max(0, primary) + orthGap * 3 + orthCenter * 0.3;
         if (score < bestScore) { bestScore = score; best = c; }
