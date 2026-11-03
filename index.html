@@ -544,6 +544,10 @@
       try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
     }
 
+    // Proxy propio por defecto (el Cloudflare Worker del dueño de este repositorio):
+    // así no hay que escribirlo con el control. Se puede cambiar en Ajustes.
+    const DEFAULT_CUSTOM_PROXY = "green-silence-cc19.alexwirrell.workers.dev";
+
     // Dirección del proxy propio: acepta "kino.x.workers.dev", con o sin https://
     // y con o sin "/?url=" (antes había que escribirla exacta o no funcionaba)
     function normalizeProxyInput(v) {
@@ -669,7 +673,8 @@
       storeQuery: "",
       showAdult: loadStore("kino_show_adult", false),
       corsMode: loadStore("kino_cors_mode", "auto"), // "auto" | "direct" | "allorigins" | "corsproxy"
-      customProxy: normalizeProxyInput(loadStore("kino_custom_proxy", "")),
+      // "off" = el usuario vació el campo a propósito (sin proxy propio)
+      customProxy: (() => { const v = loadStore("kino_custom_proxy", ""); return v === "off" ? "" : normalizeProxyInput(v || DEFAULT_CUSTOM_PROXY); })(),
       proxiesDown: false, // ningún proxy respondió hace poco (se muestra un aviso)
       lastGoodProxy: loadStore("kino_last_proxy", ""),
       deadProxies: {}, // solo en memoria: prefix -> timestamp del último fallo
@@ -705,7 +710,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r8-2026-11-03";
+    const BUILD_TAG = "r9-2026-11-03";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -2595,7 +2600,10 @@
               abre <b>github.com/alexwirrell/kino-vidaa</b> → archivo <b>cloudflare-worker.js</b> y sigue los pasos de arriba del archivo.
               Luego escribe aquí la dirección de tu worker (basta con <code>kino.TU-NOMBRE.workers.dev</code>) y pulsa 💾 Guardar.
             </p>
-            <input id="customProxyInput" class="tv-input focusable" value="${state.customProxy}" placeholder="Dirección de tu worker, ej. kino.tunombre.workers.dev" />
+            <div class="input-row" style="margin:0;">
+              <input id="customProxyInput" class="tv-input focusable" value="${state.customProxy}" placeholder="Dirección de tu worker, ej. kino.tunombre.workers.dev" />
+              <button id="writeProxyBtn" class="action-btn secondary focusable">⌨️ Escribir</button>
+            </div>
             <div class="btn-group">
               <button id="testProxiesBtn" class="action-btn secondary focusable">📡 Probar Conexión con CineHD Plus (xuper)</button>
             </div>
@@ -2666,13 +2674,17 @@
           }
           out.innerHTML += "<br>Si todos fallan, despliega un proxy propio (p. ej. un Cloudflare Worker) y pégalo arriba.";
         });
+        document.getElementById("writeProxyBtn").addEventListener("click", () => {
+          const inp = document.getElementById("customProxyInput");
+          if (promptForField(inp)) document.getElementById("saveSettingsBtn").click();
+        });
         document.getElementById("saveSettingsBtn").addEventListener("click", () => {
           state.customProxy = normalizeProxyInput(document.getElementById("customProxyInput").value);
           document.getElementById("customProxyInput").value = state.customProxy;
           state.deadProxies = {}; // dar otra oportunidad a todos con la nueva configuración
           state.proxiesDown = false;
           state.tmdbKey = document.getElementById("tmdbKeyInput").value.trim();
-          saveStore("kino_custom_proxy", state.customProxy);
+          saveStore("kino_custom_proxy", state.customProxy || "off");
           saveStore("kino_tmdb_key", state.tmdbKey);
           setStatus("Ajustes guardados correctamente");
         });
@@ -4202,7 +4214,24 @@ export default {
       if (!isTextField(el)) return;
       el.readOnly = false;
       el.dataset.editing = "1";
+      el.dataset.typed = "";
+      el.setAttribute("inputmode", "text");
     }
+    // Ventana de escritura nativa del TV (window.prompt): funciona aunque el
+    // teclado en pantalla no se abra sobre el campo
+    function promptForField(el) {
+      const label = el.getAttribute("placeholder") || "Escribe el texto";
+      let v = null;
+      try { v = window.prompt(label, el.value || ""); } catch (_) { v = null; }
+      lockField(el);
+      if (v === null || v === undefined) return false;
+      el.value = String(v).trim();
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      setStatus("✓ Texto escrito. Pulsa 💾 Guardar si hace falta", { priority: true });
+      return true;
+    }
+    document.addEventListener("input", e => { if (isEditingField(e.target)) e.target.dataset.typed = "1"; }, true);
     document.querySelectorAll(".tv-input").forEach(lockField);
     new MutationObserver(muts => {
       muts.forEach(m => m.addedNodes.forEach(n => {
@@ -4225,12 +4254,21 @@ export default {
           el.blur();
           unlockField(el);
           el.focus();
+          // Muchos TV solo abren su teclado con un "clic" sobre el campo
+          try { el.click(); } catch (_) {}
           try { const n = el.value.length; el.setSelectionRange(n, n); } catch (_) {}
-          setStatus("✏️ Escribe y pulsa OK para terminar", { priority: true });
+          setStatus("✏️ Escribe y pulsa OK para terminar · ¿No sale el teclado? Pulsa OK otra vez", { priority: true });
         }
         return; // flechas y Back siguen al manejador general
       }
       if (isBack) { e.preventDefault(); e.stopImmediatePropagation(); lockField(el); return; }
+      // 2.º OK sin haber escrito nada: el teclado no apareció → ventana nativa
+      if (isEnter && !el.dataset.typed) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        promptForField(el);
+        return;
+      }
       if (isEnter) { setTimeout(() => lockField(el), 0); return; } // el campo procesa su Enter (buscar, instalar...)
       if (e.key === "ArrowUp" || e.key === "ArrowDown") { lockField(el); return; } // y se navega
       e.stopImmediatePropagation(); // letras, ◀ ▶, borrar: son del campo
@@ -4383,6 +4421,24 @@ export default {
     }
 
     // Inicialización
+    // También se puede configurar el proxy abriendo la app con ?proxy=dirección
+    try {
+      const qp = new URLSearchParams(location.search).get("proxy");
+      if (qp) {
+        state.customProxy = normalizeProxyInput(qp);
+        saveStore("kino_custom_proxy", state.customProxy);
+      }
+    } catch (_) {}
+    // Comprobar que el proxy propio responde (aviso claro en Diagnóstico)
+    if (state.customProxy) {
+      fetchWithTimeout(state.customProxy.replace(/\?url=$/, ""), {}, 8000)
+        .then(r => r.text().then(t => {
+          const ok = /Kino VIDAA funcionando/.test(t);
+          diagLog("red", ok ? `✓ Proxy propio responde: ${state.customProxy}` : `⚠️ El proxy propio respondió algo inesperado (HTTP ${r.status}): ¿pegaste el código de cloudflare-worker.js y pulsaste Deploy?`);
+          if (!ok) setStatus("⚠️ Tu proxy propio no tiene el código de Kino: revisa el worker en Cloudflare", { priority: true });
+        }))
+        .catch(() => diagLog("red", `✗ El proxy propio no responde: ${state.customProxy}`));
+    }
     state.homeRows = loadHomeCache();
     renderView();
     document.getElementById("navHome").focus();
