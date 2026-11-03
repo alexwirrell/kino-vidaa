@@ -710,7 +710,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r9-2026-11-03";
+    const BUILD_TAG = "r10-2026-11-03";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -4368,12 +4368,24 @@ export default {
         return focusAndReveal((lastFocusRect && nearestTo(lastFocusRect, all)) || all[0]);
       }
       const vertical = dir === "up" || dir === "down";
+      const inSidebar = el => !!el.closest(".sidebar");
+      // ▶ desde el menú lateral: SIEMPRE entra al contenido (donde se estaba o
+      // al primer elemento). Antes, si nada quedaba a la misma altura del botón
+      // del menú, no pasaba nada y no se podía llegar a los cuadros de Ajustes.
+      if (scope === document && dir === "right" && inSidebar(current)) {
+        const mainList = visibleFocusables(document.getElementById("mainView"));
+        const target = (zoneMemory.main && zoneMemory.mainView === state.view && mainList.includes(zoneMemory.main))
+          ? zoneMemory.main : mainList[0];
+        return target ? focusAndReveal(target) : false;
+      }
       const r0 = current.getBoundingClientRect();
       const cx0 = r0.left + r0.width / 2, cy0 = r0.top + r0.height / 2;
       // En vertical se salta de fila en fila: los botones anidados dentro de una
       // fila enfocable (servidores) solo se recorren con ◀ ▶. Antes cada fila
       // eran 4 paradas y había que pasar botón por botón.
       const candidates = all.filter(c => c !== current &&
+        // ▲▼ no cruzan entre el menú lateral y el contenido
+        !(vertical && scope === document && inSidebar(c) !== inSidebar(current)) &&
         !(vertical && c.parentElement && c.parentElement.closest(".focusable") && !c.parentElement.closest(".focusable").contains(current)) &&
         !(vertical && c.contains(current)));
       let best = null, bestScore = Infinity;
@@ -4389,10 +4401,12 @@ export default {
           orthGap = Math.max(0, r.left - r0.right, r0.left - r.right);
           // Desde algo ancho (campo de texto, fila) se baja al elemento de la izquierda
           const refX = r0.width > r.width * 1.5 ? r0.left + r.width / 2 : cx0;
-          orthCenter = Math.abs(cx - refX);
+          // Distancia al TRAMO del candidato (0 si queda justo debajo/encima):
+          // así un cuadro ancho no pierde contra un botón pequeño más lejano
+          orthCenter = Math.max(0, r.left - refX, refX - r.right) + Math.abs(cx - refX) * 0.02;
         } else {
           orthGap = Math.max(0, r.top - r0.bottom, r0.top - r.bottom);
-          orthCenter = Math.abs(cy - cy0);
+          orthCenter = Math.max(0, r.top - cy0, cy0 - r.bottom) + Math.abs(cy - cy0) * 0.02;
         }
         // En horizontal solo se vale la misma fila (o casi): al final de una
         // fila, ▶ ya no salta a un botón de otra fila.
