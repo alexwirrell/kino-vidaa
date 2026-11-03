@@ -812,7 +812,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r32-2026-11-05";
+    const BUILD_TAG = "r33-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -2069,6 +2069,7 @@
     // pero durante su resolve() leyó una lista terminada de 10 min o más (un anuncio no dura eso),
     // la app la reproduce. Solo se usa como respaldo: nunca reemplaza lo que el plugin devuelve.
     const hlsSeen = {};
+    const lastPage = {}; // última página HTML que leyó cada plugin (para el Diagnóstico)
     const RESCUE_MIN_SECONDS = 600;
     function noteHlsList(pluginId, finalUrl, askedUrl, text, headers) {
       const seen = hlsSeen[pluginId] || (hlsSeen[pluginId] = { masters: [], lists: [] });
@@ -2128,6 +2129,10 @@
           let truncated = !!r.truncated;
           // Resumen de cada lista HLS que lee el plugin: así el Diagnóstico muestra si el servidor
           // dio la película, solo anuncios o un clip corto (señuelo) antes de que el plugin la descarte.
+          if (/^\s*</.test(text.slice(0, 200))) {
+            const ttl = (/<title[^>]*>([^<]{0,140})/i.exec(text.slice(0, 20000)) || [])[1];
+            lastPage[pluginId] = { url: String(url), status: r.status, kb: Math.round(text.length / 1024), title: ttl ? ttl.replace(/\s+/g, " ").trim() : "", at: Date.now() };
+          }
           if (r.ok && text.slice(0, 400).includes("#EXTM3U")) {
             try { diagLog("red", "   ↳ " + hlsSummary(text)); } catch (_) {}
             if (!withSecret) { try { noteHlsList(pluginId, String(r.url || url), String(url), text, o.headers); } catch (_) {} }
@@ -2490,6 +2495,11 @@
         const secs = ((Date.now() - t0) / 1000).toFixed(1);
         const size = Array.isArray(res) ? res.length + " ítems" : (res && typeof res === "object" ? Object.keys(res).length + " campos" : typeof res === "string" ? `texto de ${res.length} caracteres` : String(res));
         diagLog("plugin", `${pluginEntry.id}.${fnName}(${argHint}) → ${size} (${secs}s)`);
+        // 0 resultados: qué página recibió el plugin (¿verificación de Cloudflare, sitio cambiado?)
+        if ((fnName === "home" || fnName === "search") && Array.isArray(res) && !res.length && lastPage[pluginEntry.id] && lastPage[pluginEntry.id].at >= t0) {
+          const lp = lastPage[pluginEntry.id];
+          diagLog("plugin", `   ↳ última página que leyó: «${lp.title || "sin título"}» · ${lp.kb} KB · HTTP ${lp.status} · ${lp.url.replace(/^https?:\/\//, "").slice(0, 60)}`);
+        }
         return res;
       } catch (e) {
         const secs = ((Date.now() - t0) / 1000).toFixed(1);
@@ -2780,7 +2790,9 @@
       // lista anterior) terminaba después y pisaba las filas nuevas.
       const run = ++homeRefreshRun;
       // Cinemeta se carga por la vía rápida de arriba: no repetir sus filas como addon
-      const active = state.installed.filter(i => i.enabled !== false && (i.stremio || i.address) && i.id !== "cinemeta");
+      // El plugin instalado más recientemente va primero: antes sus filas quedaban al final de
+      // un Inicio con 20+ filas y parecía que no se había instalado
+      const active = state.installed.filter(i => i.enabled !== false && (i.stremio || i.address) && i.id !== "cinemeta").reverse();
       const total = active.length + 1;
       let done = 0;
       setStatus(`Cargando Inicio... (0/${total})`);
@@ -3647,8 +3659,18 @@
           }
           setStatus(`Búsqueda completada (${withResults} fuentes con resultados)`);
         };
-        runBtn.addEventListener("click", executeMultiSearch);
-        input.addEventListener("keydown", e => { if (e.key === "Enter") executeMultiSearch(); });
+        // Se busca con 🔍, con OK en el campo (también la tecla "listo" del teclado del TV, código 13)
+        // o al aceptar la ventana de escritura del TV. Antes, tras la ventana no pasaba nada.
+        let lastRun = { q: "", t: 0 };
+        const runOnce = () => {
+          const q = input.value.trim();
+          if (!q || (q === lastRun.q && Date.now() - lastRun.t < 1500)) return;
+          lastRun = { q, t: Date.now() };
+          executeMultiSearch();
+        };
+        runBtn.addEventListener("click", runOnce);
+        input.addEventListener("keydown", e => { if (e.key === "Enter" || e.keyCode === 13) runOnce(); });
+        input.addEventListener("kino-submit", runOnce);
       } else if (state.view === "livetv") {
         viewTitle.textContent = `Canales en Vivo (${state.liveChannels.length} canales)`;
         const container = document.createElement("div");
@@ -6257,7 +6279,8 @@ async function handle(request) {
       el.value = String(v).trim();
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
-      setStatus("✓ Texto escrito. Pulsa 💾 Guardar si hace falta", { priority: true });
+      el.dispatchEvent(new Event("kino-submit"));
+      if (el.id !== "searchInput") setStatus("✓ Texto escrito. Pulsa 💾 Guardar si hace falta", { priority: true });
       return true;
     }
     document.addEventListener("input", e => { if (isEditingField(e.target)) e.target.dataset.typed = "1"; }, true);
