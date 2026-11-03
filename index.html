@@ -401,7 +401,7 @@
 <body>
 
   <aside class="sidebar">
-    <div class="brand">KINO <span>v0.9.79 VIDAA</span></div>
+    <div class="brand">KINO <span id="buildBadge">VIDAA</span></div>
     <button class="nav-btn focusable active" id="navHome" data-view="home">
       <span>🏠 Inicio</span>
     </button>
@@ -544,6 +544,35 @@
       try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
     }
 
+    // Dirección del proxy propio: acepta "kino.x.workers.dev", con o sin https://
+    // y con o sin "/?url=" (antes había que escribirla exacta o no funcionaba)
+    function normalizeProxyInput(v) {
+      let t = String(v || "").trim();
+      if (!t) return "";
+      if (!/^https?:\/\//i.test(t)) t = "https://" + t;
+      if (!/[?&=]$/.test(t) && !t.includes("?")) t = t.replace(/\/+$/, "") + "/?url=";
+      return t;
+    }
+
+    // Arma la URL por el proxy. Con el proxy propio (Cloudflare Worker) también
+    // viajan Referer y demás cabeceras que el navegador del TV no deja enviar y
+    // que muchos servidores de video exigen.
+    function proxyFor(prefix, target, hdrs) {
+      let u = prefix + encodeURIComponent(target);
+      if (prefix && prefix === state.customProxy && hdrs) {
+        const extra = {};
+        let ref = "";
+        Object.keys(hdrs).forEach(k => {
+          const low = k.toLowerCase();
+          if (low === "referer") ref = String(hdrs[k]);
+          else if (["user-agent", "cookie", "origin"].includes(low)) extra[k] = String(hdrs[k]);
+        });
+        if (ref) u += "&ref=" + encodeURIComponent(ref);
+        if (Object.keys(extra).length) u += "&hdr=" + encodeURIComponent(JSON.stringify(extra));
+      }
+      return u;
+    }
+
     // Normalizar todos los plugins de "De Kino" y "De la comunidad"
     function buildUnifiedStore(seedList, commList) {
       const byId = new Map();
@@ -640,7 +669,8 @@
       storeQuery: "",
       showAdult: loadStore("kino_show_adult", false),
       corsMode: loadStore("kino_cors_mode", "auto"), // "auto" | "direct" | "allorigins" | "corsproxy"
-      customProxy: loadStore("kino_custom_proxy", ""),
+      customProxy: normalizeProxyInput(loadStore("kino_custom_proxy", "")),
+      proxiesDown: false, // ningún proxy respondió hace poco (se muestra un aviso)
       lastGoodProxy: loadStore("kino_last_proxy", ""),
       deadProxies: {}, // solo en memoria: prefix -> timestamp del último fallo
       searchRun: 0,
@@ -675,8 +705,10 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r7-2026-11-03";
+    const BUILD_TAG = "r8-2026-11-03";
     window.__kinoState = state; // gancho de depuración (inofensivo)
+    // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
+    document.getElementById("buildBadge").textContent = BUILD_TAG;
 
     let statusLockUntil = 0;
     function setStatus(msg, opts) {
@@ -882,7 +914,7 @@
         const proxyName = (() => { try { return new URL(proxyPrefix).host; } catch (_) { return proxyPrefix.slice(0, 30); } })();
         const t0 = Date.now();
         try {
-          const target = proxyPrefix + encodeURIComponent(url);
+          const target = proxyFor(proxyPrefix, url, headers);
           const res = await fetchWithTimeout(target, { method, headers: safeHeaders, body }, Math.min(timeoutMs, 15000));
           const txt = await readBodyCapped(res);
           diagLog("red", `${method} ${shortUrl} → proxy ${proxyName} → HTTP ${res.status} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
@@ -934,7 +966,19 @@
       // la marca es una pista, no una condena (una sola URL que falle no debe vetar el proxy).
       const isDead = p => Date.now() - (state.deadProxies[p] || 0) < 10 * 60 * 1000;
       const anyAlive = proxies.some(p => !isDead(p));
-      const usable = proxies.filter(p => !anyAlive || !isDead(p));
+      let usable = proxies.filter(p => !anyAlive || !isDead(p));
+      if (!anyAlive) {
+        // Todos caídos hace poco: antes se reintentaban TODOS con 15 s cada uno
+        // en cada petición (la app se volvía lentísima). Ahora solo se prueba
+        // uno, el que falló hace más tiempo, por si ya volvió.
+        usable = usable.slice().sort((a, b) => (state.deadProxies[a] || 0) - (state.deadProxies[b] || 0)).slice(0, 1);
+        if (!state.proxiesDown) {
+          state.proxiesDown = true;
+          diagLog("red", "⚠️ Ningún proxy responde desde esta red: configura tu proxy propio (Ajustes / Red)");
+          setStatus("⚠️ Los proxies públicos no responden en tu red: configura tu proxy propio en ⚙️ Ajustes", { priority: true });
+          if (state.view === "home") renderView();
+        }
+      }
       const attempt = async p => {
         try {
           const r = await tryProxy(p);
@@ -950,6 +994,7 @@
         }
       };
       const remember = p => {
+        if (state.proxiesDown) { state.proxiesDown = false; if (state.view === "home") renderView(); }
         // Recuerda el proxy que sí funcionó para intentarlo primero la próxima vez
         if (state.lastGoodProxy !== p) { state.lastGoodProxy = p; saveStore("kino_last_proxy", p); }
       };
@@ -1742,7 +1787,7 @@
       try {
         const r = await withTimeout(callPluginFn(inst, "resolve", ch.ref), 30000, inst.name);
         const streamUrl = r && (r.url || (Array.isArray(r.copies) && r.copies[0] && r.copies[0].url));
-        if (streamUrl) startPlayback(streamUrl, ch.name, { mime: r.mime });
+        if (streamUrl) startPlayback(streamUrl, ch.name, { mime: r.mime, referer: refOf(r) });
         else setStatus("No se pudo obtener el video del canal");
       } catch (e) {
         setStatus(`✗ ${ch.name}: ${(e && (e.userMessage || e.message)) || "no disponible"}`, { priority: true });
@@ -2246,6 +2291,17 @@
           <button class="action-btn small focusable" id="goStoreBtn">🧩 Ir a Tienda de Plugins (${state.storeEntries.length})</button>
         `;
         viewContent.appendChild(topActions);
+        if (state.proxiesDown && !state.customProxy) {
+          const warn = document.createElement("div");
+          warn.className = "list-box";
+          warn.style.borderColor = "rgba(229,9,20,0.6)";
+          warn.innerHTML = `<div><strong>⚠️ Los proxies públicos no responden en tu red</strong>
+            <div style="font-size:13px; color:var(--muted); margin-top:4px;">Por eso los plugins no encuentran videos y no se pueden capturar los servidores web.
+            Solución gratis (5 min): crea tu proxy propio — ver ⚙️ Ajustes / Red.</div></div>
+            <button class="action-btn small focusable" id="goSettingsBtn">⚙️ Ir a Ajustes</button>`;
+          viewContent.appendChild(warn);
+          warn.querySelector("#goSettingsBtn").addEventListener("click", () => { state.view = "settings"; renderView(); });
+        }
         document.getElementById("reloadHomeBtn").addEventListener("click", () => refreshHomeCatalog());
         document.getElementById("goStoreBtn").addEventListener("click", () => { state.view = "plugins"; renderView(); });
 
@@ -2532,7 +2588,14 @@
               <button class="pill-btn focusable ${state.corsMode === 'auto' ? 'active' : ''}" data-cors="auto">Automático (Directo + Respaldo Proxy)</button>
               <button class="pill-btn focusable ${state.corsMode === 'direct' ? 'active' : ''}" data-cors="direct">Solo Directo</button>
             </div>
-            <input id="customProxyInput" class="tv-input focusable" value="${state.customProxy}" placeholder="URL de Proxy CORS propio opcional (ej. https://mi-worker.workers.dev/?url=)" />
+            <h3 style="margin-top:6px;">🔑 Proxy propio (Cloudflare Worker, gratis)</h3>
+            <p style="color:var(--muted); font-size:13px; line-height:1.6;">
+              Si los proxies públicos no responden (en 🩺 Diagnóstico sale "sin respuesta"), los plugins no pueden buscar
+              ni la app puede sacar el video de los servidores web. Crea tu proxy en 5 minutos <b>desde el teléfono o el computador</b>:
+              abre <b>github.com/alexwirrell/kino-vidaa</b> → archivo <b>cloudflare-worker.js</b> y sigue los pasos de arriba del archivo.
+              Luego escribe aquí la dirección de tu worker (basta con <code>kino.TU-NOMBRE.workers.dev</code>) y pulsa 💾 Guardar.
+            </p>
+            <input id="customProxyInput" class="tv-input focusable" value="${state.customProxy}" placeholder="Dirección de tu worker, ej. kino.tunombre.workers.dev" />
             <div class="btn-group">
               <button id="testProxiesBtn" class="action-btn secondary focusable">📡 Probar Conexión con CineHD Plus (xuper)</button>
             </div>
@@ -2569,7 +2632,7 @@
           const target = "https://cinehdplus.org/peliculas/?sort=recent";
           const candidates = [];
           if (document.getElementById("customProxyInput").value.trim()) {
-            candidates.push({ label: "Tu proxy propio", prefix: document.getElementById("customProxyInput").value.trim() });
+            candidates.push({ label: "Tu proxy propio", prefix: normalizeProxyInput(document.getElementById("customProxyInput").value) });
           }
           candidates.push(
             { label: "codetabs", prefix: "https://api.codetabs.com/v1/proxy?quest=" },
@@ -2604,7 +2667,10 @@
           out.innerHTML += "<br>Si todos fallan, despliega un proxy propio (p. ej. un Cloudflare Worker) y pégalo arriba.";
         });
         document.getElementById("saveSettingsBtn").addEventListener("click", () => {
-          state.customProxy = document.getElementById("customProxyInput").value.trim();
+          state.customProxy = normalizeProxyInput(document.getElementById("customProxyInput").value);
+          document.getElementById("customProxyInput").value = state.customProxy;
+          state.deadProxies = {}; // dar otra oportunidad a todos con la nueva configuración
+          state.proxiesDown = false;
           state.tmdbKey = document.getElementById("tmdbKeyInput").value.trim();
           saveStore("kino_custom_proxy", state.customProxy);
           saveStore("kino_tmdb_key", state.tmdbKey);
@@ -2625,18 +2691,92 @@
           </div>
           <div class="list-box" style="flex-direction:column; align-items:stretch; gap:12px;">
             <h3>Proxy propio gratis (recomendado si los públicos fallan)</h3>
-            <p style="color:var(--muted); font-size:13px;">1) Entra en <b>workers.cloudflare.com</b> (cuenta gratis) → Create Worker → Deploy. 2) Edit y pega este código → Deploy. 3) Copia la URL de tu worker, añade <code>?url=</code> al final y pégala en Ajustes ▸ Proxy propio.</p>
-            <pre id="workerCode" class="diag-log" style="max-height:180px;">addEventListener('fetch', e =&gt; e.respondWith((async () =&gt; {
-  const u = new URL(e.request.url), t = u.searchParams.get('url');
-  if (!t) return new Response('falta ?url=', { status: 400 });
-  const h = new Headers(e.request.headers);
-  h.delete('origin'); h.delete('referer'); h.delete('cookie');
-  const r = await fetch(t, { method: e.request.method, headers: h,
-    body: ['GET','HEAD'].includes(e.request.method) ? undefined : e.request.body });
-  const out = new Response(r.body, r);
-  out.headers.set('Access-Control-Allow-Origin', '*');
-  return out;
-})()));</pre>
+            <p style="color:var(--muted); font-size:13px;">Este código está también en <b>github.com/alexwirrell/kino-vidaa</b> → <b>cloudflare-worker.js</b> (cópialo desde el teléfono o el computador; los pasos están arriba del archivo). Después pega la dirección del worker en ⚙️ Ajustes / Red → Proxy propio.</p>
+            <pre id="workerCode" class="diag-log" style="max-height:180px;">// =============================================================================
+// Proxy propio de Kino VIDAA para Cloudflare Workers (gratis)
+//
+// Por qué: los proxies públicos (codetabs, allorigins, cors.lol) suelen estar
+// caídos o bloqueados, y sin proxy los plugins no pueden buscar ni la app puede
+// sacar el video de los servidores web. Este worker es TU proxy: rápido,
+// gratis (100.000 peticiones al día) y con soporte de video.
+//
+// Cómo instalarlo (5 minutos, desde el teléfono o el computador):
+//   1. Entra en https://dash.cloudflare.com (crea una cuenta gratis).
+//   2. Menú "Workers &amp; Pages" → "Create" → "Create Worker" → "Deploy".
+//   3. "Edit code": borra todo, pega ESTE archivo completo y pulsa "Deploy".
+//   4. Copia la dirección del worker (algo como https://kino.TU-NOMBRE.workers.dev).
+//   5. En la app: ⚙️ Ajustes / Red → Proxy propio → pega la dirección → Guardar.
+//      (La app añade sola el "/?url=" del final.)
+//
+// Uso: https://TU-WORKER.workers.dev/?url=&lt;destino codificado&gt;
+//      &amp;ref=&lt;Referer&gt;   opcional: muchos servidores de video lo exigen
+//      &amp;hdr=&lt;JSON&gt;      opcional: cabeceras extra {"User-Agent": "...", "Cookie": "..."}
+// =============================================================================
+
+const BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+
+// Cabeceras del navegador del TV que no se reenvían al destino
+const DROP = ["host", "origin", "referer", "cookie", "cf-connecting-ip", "cf-ipcountry", "cf-ray", "cf-visitor",
+  "x-forwarded-for", "x-forwarded-proto", "x-real-ip", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"];
+
+function cors(headers) {
+  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS");
+  headers.set("Access-Control-Allow-Headers", "*");
+  headers.set("Access-Control-Expose-Headers", "*");
+  headers.set("Access-Control-Max-Age", "86400");
+  return headers;
+}
+
+export default {
+  async fetch(request) {
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(new Headers()) });
+
+    const self = new URL(request.url);
+    const target = self.searchParams.get("url");
+    if (!target) {
+      return new Response("Proxy de Kino VIDAA funcionando ✓  (uso: /?url=https://...)", {
+        status: 200, headers: cors(new Headers({ "content-type": "text/plain; charset=utf-8" })) });
+    }
+    let dest;
+    try { dest = new URL(target); } catch (_) { return new Response("url inválida", { status: 400, headers: cors(new Headers()) }); }
+    if (!/^https?:$/.test(dest.protocol)) return new Response("solo http/https", { status: 400, headers: cors(new Headers()) });
+
+    const headers = new Headers();
+    for (const [k, v] of request.headers) if (!DROP.includes(k.toLowerCase())) headers.set(k, v);
+    headers.set("User-Agent", BROWSER_UA);
+    const ref = self.searchParams.get("ref");
+    if (ref) {
+      headers.set("Referer", ref);
+      try { headers.set("Origin", new URL(ref).origin); } catch (_) {}
+    }
+    const extra = self.searchParams.get("hdr");
+    if (extra) {
+      try { for (const [k, v] of Object.entries(JSON.parse(extra))) headers.set(k, String(v)); } catch (_) {}
+    }
+
+    let upstream;
+    try {
+      upstream = await fetch(dest.toString(), {
+        method: request.method,
+        headers,
+        body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
+        redirect: "follow",
+      });
+    } catch (err) {
+      return new Response("el destino no respondió: " + err, { status: 502, headers: cors(new Headers()) });
+    }
+
+    const out = new Headers(upstream.headers);
+    ["content-security-policy", "content-security-policy-report-only", "x-frame-options",
+     "cross-origin-resource-policy", "cross-origin-embedder-policy", "cross-origin-opener-policy",
+     "set-cookie"].forEach(h =&gt; out.delete(h));
+    out.set("X-Final-Url", upstream.url);
+    return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers: cors(out) });
+  },
+};
+</pre>
             <div class="btn-group">
               <button id="copyWorkerBtn" class="action-btn secondary small focusable">📋 Copiar código del worker</button>
             </div>
@@ -2792,17 +2932,17 @@
         `;
         row.querySelector("[data-play-web]").addEventListener("click", e => {
           e.stopPropagation();
-          startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { mime: s.mime });
+          startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { mime: s.mime, referer: refOf(s) });
         });
         row.querySelector("[data-play-proxy]").addEventListener("click", e => {
           e.stopPropagation();
-          startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { viaProxy: true, mime: s.mime });
+          startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { viaProxy: true, mime: s.mime, referer: refOf(s) });
         });
         row.querySelector("[data-play-native]").addEventListener("click", e => {
           e.stopPropagation();
           handoffToVidaaNativePlayer(s.url, title);
         });
-        row.addEventListener("click", () => startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { mime: s.mime }));
+        row.addEventListener("click", () => startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { mime: s.mime, referer: refOf(s) }));
         streamsList.appendChild(row);
       });
     }
@@ -2976,7 +3116,7 @@
         renderStreamOptions(state.directStreams, title, { pending: true });
         if (opts.autoplay && !autoplayed && !playerUI.isOpen()) {
           const first = state.directStreams.find(x => x.url);
-          if (first) { autoplayed = true; startPlayback(first.url, `${title} (${first.label})`, { mime: first.mime }); }
+          if (first) { autoplayed = true; startPlayback(first.url, `${title} (${first.label})`, { mime: first.mime, referer: refOf(first) }); }
         }
       };
       const kindType = opts.season ? "series" : (item.kind === "series" ? "series" : "movie");
@@ -3034,10 +3174,10 @@
 
     // URL de reproducción a través del proxy CORS (para CDNs que no envían
     // cabeceras CORS, que hls.js necesita, o que bloquean al WebView)
-    function proxiedPlaybackUrl(url) {
+    function proxiedPlaybackUrl(url, referer) {
       // El proxy propio primero (Cloudflare Worker de Diagnóstico: aguanta video)
       const prefix = state.customProxy || state.lastGoodProxy || "https://api.codetabs.com/v1/proxy?quest=";
-      return prefix + encodeURIComponent(url);
+      return proxyFor(prefix, url, referer ? { Referer: referer } : null);
     }
 
     // =========================================================================
@@ -3137,7 +3277,8 @@
       function prox(u) {
         var a = abs(u);
         if (!a || !/^https?:/i.test(a) || !PROXY || a.indexOf(PROXY) === 0) return u;
-        return PROXY + encodeURIComponent(a);
+        // Con el proxy propio, el servidor ve la petición como venida de su página
+        return PROXY + encodeURIComponent(a) + (cfg.custom ? "&ref=" + encodeURIComponent(PAGE) : "");
       }
       // Origen aislado: localStorage y cookies lanzarían error y romperían el reproductor
       function mem() {
@@ -3350,7 +3491,7 @@
         }
         const token = "k" + Math.random().toString(36).slice(2);
         const proxy = state.customProxy || state.lastGoodProxy || "https://api.codetabs.com/v1/proxy?quest=";
-        const cfg = JSON.stringify({ token, proxy, page: url }).replace(/</g, "\\u003c");
+        const cfg = JSON.stringify({ token, proxy, page: url, custom: !!state.customProxy && proxy === state.customProxy }).replace(/</g, "\\u003c");
         const inject = `<base href="${url.replace(/"/g, "&quot;")}"><script>(${kinoCaptureHook.toString()})(${cfg});<\/script>`;
         let html = r.text.replace(/<meta[^>]+http-equiv\s*=\s*["']?content-security-policy[^>]*>/gi, "");
         // Los iframes internos no se cargan aquí: se informan y la app los abre en su propia caja
@@ -3465,7 +3606,7 @@
         if (run !== extractRun || state.selectedItem !== item) return;
         media.slice(0, 2).forEach(mv => {
           if ((state.directStreams || []).some(d => d.url === mv.url)) return;
-          const entry = { url: mv.url, label: `${src.name} · extraído`, mime: mv.mime, extracted: true };
+          const entry = { url: mv.url, label: `${src.name} · extraído`, mime: mv.mime, extracted: true, referer: mv.referer };
           found.push(entry);
           state.directStreams.push(entry);
         });
@@ -3519,7 +3660,7 @@
           return;
         }
         playerUI.osd("⚡ Video encontrado: ya se controla con el mando");
-        startPlayback(media[0].url, `${title || "Reproduciendo"} — ${src.name}`, { mime: media[0].mime });
+        startPlayback(media[0].url, `${title || "Reproduciendo"} — ${src.name}`, { mime: media[0].mime, referer: refOf(media[0]) });
       });
     }
 
@@ -3542,12 +3683,12 @@
     // hls.js con TODAS sus peticiones (lista, sub-listas y trozos .ts) por el
     // proxy. Antes solo la lista pasaba por el proxy y los trozos seguían
     // pidiéndose directo, así que los canales sin CORS o en http:// fallaban.
-    function makeProxyLoader() {
+    function makeProxyLoader(referer) {
       const Base = Hls.DefaultConfig.loader;
       return class ProxyLoader extends Base {
         load(context, config, callbacks) {
           const original = context.url;
-          context.url = proxiedPlaybackUrl(original);
+          context.url = proxiedPlaybackUrl(original, referer);
           const onSuccess = callbacks.onSuccess;
           const cb = Object.assign({}, callbacks, {
             onSuccess: (response, stats, ctx, details) => {
@@ -3560,6 +3701,13 @@
           super.load(context, config, cb);
         }
       };
+    }
+
+    // Referer que pide el servidor del video (de la captura o de las cabeceras del plugin)
+    function refOf(x) {
+      if (!x) return "";
+      const h = x.headers || {};
+      return x.referer || h.Referer || h.referer || "";
     }
 
     let playbackRun = 0;
@@ -3598,6 +3746,9 @@
         stages.push("proxy");
       }
       if (opts.viaProxy) stages = stages.filter(st => st === "hlsproxy" || st === "proxy");
+      // Video que exige Referer (capturado de un servidor web) y hay proxy
+      // propio: ir directo por el proxy, que sí puede enviarlo
+      if (opts.referer && state.customProxy) stages.sort((a, b) => (/proxy/.test(b) ? 1 : 0) - (/proxy/.test(a) ? 1 : 0));
       stages = stages.filter((st, i) => stages.indexOf(st) === i);
       if (mixed) diagLog("player", "Enlace http:// en página https://: se usa el proxy directamente");
 
@@ -3636,7 +3787,7 @@
         video.onerror = () => fail(`error de video${video.error ? " código " + video.error.code : ""}`);
         if (stage === "hls" || stage === "hlsproxy") {
           const cfg = { manifestLoadingTimeOut: 20000, fragLoadingTimeOut: 20000, levelLoadingTimeOut: 20000 };
-          if (stage === "hlsproxy") cfg.loader = makeProxyLoader();
+          if (stage === "hlsproxy") cfg.loader = makeProxyLoader(opts.referer);
           const hls = new Hls(cfg);
           state.hlsInstance = hls;
           hls.on(Hls.Events.MANIFEST_PARSED, () => tryAutoplay(video));
@@ -3646,7 +3797,7 @@
           hls.loadSource(url);
           hls.attachMedia(video);
         } else {
-          video.src = stage === "proxy" ? proxiedPlaybackUrl(url) : url;
+          video.src = stage === "proxy" ? proxiedPlaybackUrl(url, opts.referer) : url;
           tryAutoplay(video);
         }
       };
@@ -3844,7 +3995,7 @@
       if (!it) return;
       const playDirect = () => {
         const d = (state.directStreams || []).find(x => x.url);
-        if (d) { startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime }); return true; }
+        if (d) { startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime, referer: refOf(d) }); return true; }
         return false;
       };
       // 1. Enlace directo (se controla con el mando) o el video propio del título
@@ -3854,7 +4005,7 @@
       if (it.pluginId && it.ref && !it.stremioBase) {
         const list = await resolvePluginRef(it.pluginId, it.ref, it.title);
         const first = list.find(x => x.url);
-        if (first) startPlayback(first.url, `${it.title} (${first.label})`, { mime: first.mime });
+        if (first) startPlayback(first.url, `${it.title} (${first.label})`, { mime: first.mime, referer: refOf(first) });
         return;
       }
       // 3. Esperar (máx. 15 s) a que la búsqueda en plugins o el extractor de
@@ -4008,7 +4159,7 @@
         const cur = directs.findIndex(x => x.url === state.activeVideoUrl);
         const nxt = directs[(cur + 1) % directs.length];
         playerUI.osd(`🔄 ${nxt.label}`);
-        startPlayback(nxt.url, `${state.selectedItem ? state.selectedItem.title : "Kino TV"} (${nxt.label})`, { mime: nxt.mime });
+        startPlayback(nxt.url, `${state.selectedItem ? state.selectedItem.title : "Kino TV"} (${nxt.label})`, { mime: nxt.mime, referer: refOf(nxt) });
         return;
       }
       if (!state.activeSources.length) { setStatus("No hay más servidores en la lista"); return; }
