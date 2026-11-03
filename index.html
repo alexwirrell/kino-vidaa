@@ -738,7 +738,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r19-2026-11-04";
+    const BUILD_TAG = "r20-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -2241,18 +2241,30 @@
       // mismo que se reactiva en cada llamada (storage/config coherentes).
       const env = createKinoEnv(id, manifest);
       globalThis.kino = env;
-      // No inyectar la declaración si el propio plugin ya declara `kino`
-      const declaresKino = /(^|\n)\s*(?:const|let|var)\s+kino\b/.test(code);
+      // Cada plugin tiene su propio hueco para su entorno. Antes se leía de
+      // `globalThis.kino` al compilar: con 4 plugins cargándose a la vez, uno se
+      // quedaba con el entorno de otro (YojaTV escribía como CineHax+, con la
+      // configuración y el almacenamiento ajenos).
+      const slot = "k" + Math.random().toString(36).slice(2);
+      (globalThis.__kinoEnvs = globalThis.__kinoEnvs || {})[slot] = env;
+      const slotExpr = `globalThis.__kinoEnvs[${JSON.stringify(slot)}]`;
+      // Los plugins que leen `globalThis.kino` en cada llamada (p. ej. Latino) también usan su hueco
+      code = code.replace(/\b(?:globalThis|window|self)\.kino\b(?!\s*=)/g, slotExpr);
       let modExports = null;
       let importErr = null;
+      let declaresKino = false;
+      const tryImport = async (src) => {
+        const blobUrl = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+        try { return await import(blobUrl); } finally { URL.revokeObjectURL(blobUrl); }
+      };
       try {
-        const wrappedCode = declaresKino ? code : `const kino = globalThis.kino;\n${code}`;
-        const blob = new Blob([wrappedCode], { type: "text/javascript" });
-        const blobUrl = URL.createObjectURL(blob);
-        try { modExports = await import(blobUrl); }
-        finally { URL.revokeObjectURL(blobUrl); }
+        modExports = await tryImport(`const kino = ${slotExpr};\n${code}`);
       } catch (err) {
-        importErr = err;
+        // Solo si el plugin ya declara `kino` en su nivel superior, va sin la declaración
+        if (/kino.*already been declared|redeclar|Identifier 'kino'/i.test(String(err && err.message))) {
+          declaresKino = true;
+          try { modExports = await tryImport(code); } catch (err2) { importErr = err2; }
+        } else importErr = err;
       }
 
       if (!modExports) {
@@ -4873,6 +4885,9 @@ export default {
         if (!mixed) stages.push("native");
         stages.push("proxy");
       }
+      // http:// en página https://: algunos navegadores de TV sí dejan reproducir
+      // video http en el reproductor nativo (contenido "pasivo"). Último intento.
+      if (mixed) stages.push("native");
       if (opts.viaProxy) stages = stages.filter(st => st === "hlsproxy" || st === "proxy");
       // Video que exige Referer (capturado de un servidor web) y hay proxy
       // propio: ir directo por el proxy, que sí puede enviarlo
@@ -4891,7 +4906,14 @@ export default {
       };
       const fail = (why) => {
         if (run !== playbackRun) return;
-        diagLog("player", `✗ ${stages[stageIdx]}: ${why} · ${String(url).slice(0, 80)}`);
+        const st = stages[stageIdx];
+        diagLog("player", `✗ ${st}: ${why} · ${String(url).slice(0, 80)}`);
+        // Por el proxy: preguntar qué respondió (p. ej. Cloudflare no conecta a ese puerto o IP)
+        if (/proxy/.test(st)) {
+          fetchWithTimeout(proxiedPlaybackUrl(url, opts.referer), {}, 8000)
+            .then(r => r.text().then(t => diagLog("player", `   ↳ el proxy respondió HTTP ${r.status}: ${String(t).replace(/\s+/g, " ").slice(0, 140)}`)))
+            .catch(() => diagLog("player", "   ↳ el proxy no respondió"));
+        }
         nextStage();
       };
       const nextStage = () => {
@@ -4932,6 +4954,7 @@ export default {
       };
       nextStage();
       // Subtítulos: los del propio video y los de las fuentes de subtítulos
+      if (opts.live) diagLog("subtítulos", "canal en vivo: no se buscan subtítulos (solo películas y series)");
       Subs.start(opts.subtitles || [], opts.live ? null : state.selectedItem);
       // Foco en Pausa/Play (antes en Cerrar: un OK de más cerraba el video)
       playerUI.show(true);
@@ -5138,6 +5161,7 @@ export default {
     const Subs = {
       prefs: Object.assign({ lang: "es", size: "normal" }, loadStore("kino_sub_prefs", {})),
       tracks: [],      // [{ id, lang, label, source, url, format }]
+      searching: false,
       current: null,   // id del track mostrado
       run: 0,
       blobUrls: [],
@@ -5155,6 +5179,18 @@ export default {
           try {
             const meta = await kinoMeta(tmdb ? { type: kind, ids: { tmdb } } : { type: kind, title: item.title, year: item.year ? String(item.year).slice(0, 4) : undefined });
             if (meta && meta.ids) { imdb = meta.ids.imdb || imdb; tmdb = meta.ids.tmdb || tmdb; }
+          } catch (_) {}
+        }
+        // Sin llave de TMDB: buscar el título en Cinemeta (sin llave) para obtener el id de IMDb
+        if (!imdb && item.title) {
+          try {
+            const year = item.year ? String(item.year).slice(0, 4) : "";
+            const clean = String(item.title).replace(/\s*\((19|20)\d{2}\)\s*$/, "").trim();
+            const list = await fetchCinemetaCatalog(kind === "series" ? "series" : "movie", clean);
+            const norm = t => foldAccents(String(t || "").toLowerCase()).replace(/[^a-z0-9]+/g, " ").trim();
+            const same = list.filter(m => norm(m.title) === norm(clean));
+            const pick = (year && same.find(m => String(m.year).slice(0, 4) === year)) || (same.length === 1 ? same[0] : null) || (!same.length && list.length === 1 ? list[0] : null);
+            if (pick && pick.imdbId) { imdb = pick.imdbId; diagLog("subtítulos", `id de IMDb por Cinemeta: ${clean} → ${imdb}`); }
           } catch (_) {}
         }
         return {
@@ -5187,6 +5223,7 @@ export default {
       async start(streamSubs, item) {
         const run = ++this.run;
         this.clear();
+        this.searching = !!item;
         this.add(streamSubs, "del video");
         this.autoPick(run);
         const ctx = await this.contextFor(item);
@@ -5220,6 +5257,8 @@ export default {
         }
         await Promise.all(jobs.map(j => j.catch(() => {})));
         if (run !== this.run) return;
+        this.searching = false;
+        if (this.isOpen()) this.openPanel(); // refrescar la lista si estaba abierta
         diagLog("subtítulos", `${this.tracks.length} disponibles${ctx.imdbId ? " para " + ctx.imdbId : " (sin id de IMDb: pon la llave de TMDB para buscar más)"}`);
         this.autoPick(run);
       },
@@ -5328,7 +5367,7 @@ export default {
         if (!this.tracks.length) {
           const note = document.createElement("div");
           note.className = "subs-note";
-          note.textContent = "Buscando subtítulos… (OpenSubtitles y tus plugins de subtítulos)";
+          note.textContent = this.searching ? "Buscando subtítulos… (OpenSubtitles y tus plugins de subtítulos)" : "No se encontraron subtítulos para este título";
           list.appendChild(note);
         }
         this.tracks.slice(0, 14).forEach(t => mk(`${t.label} — ${t.source}${t.broken ? " ✗" : ""}`, t.id === this.current, () => { this.select(t.id); this.closePanel(); }));
