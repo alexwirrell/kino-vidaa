@@ -742,7 +742,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r24-2026-11-05";
+    const BUILD_TAG = "r25-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -1028,7 +1028,9 @@
           }
           return { ok: res.ok, status: res.status, url: finalUrl, text: txt, raw, headers: proxyPrefix === state.customProxy ? collectHeaders(res) : {}, truncated, via: proxyPrefix };
         } catch (e) {
-          diagLog("red", `${method} ${shortUrl} → proxy ${proxyName} → sin respuesta (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+          const secs = (Date.now() - t0) / 1000;
+          diagLog("red", `${method} ${shortUrl} → proxy ${proxyName} → sin respuesta (${secs.toFixed(1)}s)`);
+          if (proxyPrefix === state.customProxy && secs < 1.5) diagLog("red", "   ↳ tu worker falló al instante (error interno sin CORS): actualiza cloudflare-worker.js para ver el motivo");
           throw e;
         }
       };
@@ -1046,19 +1048,27 @@
         for (let i = proxies.length - 1; i >= 0; i--) if (proxies[i] !== state.customProxy) proxies.splice(i, 1);
       }
 
+      // 401/403 directo con proxy propio: muchos servidores rechazan la petición del
+      // navegador por su cabecera Origin (la app Kino de Android no la manda); por el
+      // worker (que la quita y puede poner Referer) suelen responder. Reintentar ahí.
+      const retryViaOwn = d => !!state.customProxy && !options.noRetryOwn && (d.status === 401 || d.status === 403);
+      let directTried = false;
       if (state.corsMode === "direct" || isLikelyCorsFriendly(url)) {
         try {
           const d = await tryDirect();
-          if (state.corsMode === "direct" || !looksBlocked(d)) return d;
+          directTried = true;
+          if (state.corsMode === "direct" || (!looksBlocked(d) && !retryViaOwn(d))) return d;
+          if (retryViaOwn(d)) diagLog("red", `   ↳ HTTP ${d.status} directo: se reintenta por tu proxy propio`);
         } catch (err) {
           if (state.corsMode === "direct") throw err;
         }
       }
 
-      if (state.corsMode === "auto") {
+      if (state.corsMode === "auto" && !directTried) {
         try {
           const d = await tryDirect();
-          if (!looksBlocked(d)) return d;
+          if (!looksBlocked(d) && !retryViaOwn(d)) return d;
+          if (retryViaOwn(d)) diagLog("red", `   ↳ HTTP ${d.status} directo: se reintenta por tu proxy propio`);
         } catch (_) {}
         // Sonda no-cors para video: evita que los proxies se ahoguen con archivos
         // pesados y confirma al plugin que el CDN del video sí responde.
@@ -3905,7 +3915,18 @@ function cors(headers) {
 }
 
 export default {
+  // Cualquier error interno vuelve con CORS y su motivo (si no, el TV solo ve
+  // "sin respuesta" y no se sabe qué pasó)
   async fetch(request) {
+    try { return await handle(request); }
+    catch (err) {
+      return new Response("error interno del worker: " + (err &amp;&amp; err.stack ? String(err.stack).slice(0, 400) : err), { status: 500, headers: cors(new Headers({ "content-type": "text/plain; charset=utf-8" })) });
+    }
+  },
+};
+
+async function handle(request) {
+  {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(new Headers()) });
 
     const self = new URL(request.url);
@@ -3956,9 +3977,11 @@ export default {
      "cross-origin-resource-policy", "cross-origin-embedder-policy", "cross-origin-opener-policy",
      "set-cookie"].forEach(h =&gt; out.delete(h));
     out.set("X-Final-Url", upstream.url);
-    return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers: cors(out) });
-  },
-};
+    // Estados que Response no admite (p. ej. 1xx o &gt; 599) se normalizan
+    const st = upstream.status &gt;= 200 &amp;&amp; upstream.status &lt;= 599 ? upstream.status : 502;
+    return new Response(upstream.body, { status: st, statusText: st === upstream.status ? upstream.statusText : "", headers: cors(out) });
+  }
+}
 </pre>
             <div class="btn-group">
               <button id="copyWorkerBtn" class="action-btn secondary small focusable">📋 Copiar código del worker</button>

@@ -160,7 +160,18 @@ function cors(headers) {
 }
 
 export default {
+  // Cualquier error interno vuelve con CORS y su motivo (si no, el TV solo ve
+  // "sin respuesta" y no se sabe qué pasó)
   async fetch(request) {
+    try { return await handle(request); }
+    catch (err) {
+      return new Response("error interno del worker: " + (err && err.stack ? String(err.stack).slice(0, 400) : err), { status: 500, headers: cors(new Headers({ "content-type": "text/plain; charset=utf-8" })) });
+    }
+  },
+};
+
+async function handle(request) {
+  {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(new Headers()) });
 
     const self = new URL(request.url);
@@ -211,6 +222,8 @@ export default {
      "cross-origin-resource-policy", "cross-origin-embedder-policy", "cross-origin-opener-policy",
      "set-cookie"].forEach(h => out.delete(h));
     out.set("X-Final-Url", upstream.url);
-    return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers: cors(out) });
-  },
-};
+    // Estados que Response no admite (p. ej. 1xx o > 599) se normalizan
+    const st = upstream.status >= 200 && upstream.status <= 599 ? upstream.status : 502;
+    return new Response(upstream.body, { status: st, statusText: st === upstream.status ? upstream.statusText : "", headers: cors(out) });
+  }
+}
