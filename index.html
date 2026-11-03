@@ -742,7 +742,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r27-2026-11-05";
+    const BUILD_TAG = "r28-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -1990,6 +1990,41 @@
       return `lista de video: ${segs} tramos · ${fmt(total)}${text.includes("#EXT-X-ENDLIST") ? "" : " · en vivo"} · ${hosts.join(", ")}`;
     }
 
+    // Rescate de listas HLS: algunos plugins descartan un episodio completo por error (p. ej.
+    // porque sus tramos están en un CDN con "ad" en el nombre). Si el plugin termina sin enlace
+    // pero durante su resolve() leyó una lista terminada de 10 min o más (un anuncio no dura eso),
+    // la app la reproduce. Solo se usa como respaldo: nunca reemplaza lo que el plugin devuelve.
+    const hlsSeen = {};
+    const RESCUE_MIN_SECONDS = 600;
+    function noteHlsList(pluginId, finalUrl, askedUrl, text, headers) {
+      const seen = hlsSeen[pluginId] || (hlsSeen[pluginId] = { masters: [], lists: [] });
+      const now = Date.now();
+      seen.masters = seen.masters.filter(m => now - m.at < 120000).slice(-20);
+      seen.lists = seen.lists.filter(m => now - m.at < 120000).slice(-20);
+      const uris = text.split(/\r?\n/).map(l => l.trim()).filter(l => l && l.charAt(0) !== "#");
+      const abs = u => { try { return new URL(u, finalUrl).href; } catch (_) { return u; } };
+      const hdrs = {};
+      Object.keys(headers || {}).forEach(k => { if (/^(user-agent|referer|origin|cookie)$/i.test(k)) hdrs[k] = String(headers[k]); });
+      if (/#EXT-X-STREAM-INF/.test(text)) {
+        seen.masters.push({ url: askedUrl, variants: uris.map(abs), headers: hdrs, at: now });
+        return;
+      }
+      if (!/#EXT-X-ENDLIST/.test(text)) return; // en vivo o incompleta: no se rescata
+      let total = 0;
+      text.replace(/#EXTINF:([\d.]+)/g, (_, d) => { total += Number(d) || 0; return ""; });
+      if (total < RESCUE_MIN_SECONDS) return;
+      const master = seen.masters.slice().reverse().find(m => m.variants.includes(askedUrl) || m.variants.includes(finalUrl));
+      seen.lists.push({ url: master ? master.url : askedUrl, headers: master ? master.headers : hdrs, total, at: now });
+    }
+    function hlsRescue(pluginId, since) {
+      const seen = hlsSeen[pluginId];
+      const hit = seen && seen.lists.filter(x => x.at >= since).pop();
+      if (!hit) return null;
+      const mins = Math.round(hit.total / 60);
+      diagLog("player", `🛟 el plugin no dio enlace, pero leyó una lista de ${mins} min: se reproduce esa`);
+      return { url: hit.url, mime: "application/x-mpegURL", headers: hit.headers, label: `Lista rescatada (${mins} min)` };
+    }
+
     function createKinoEnv(pluginId, manifest) {
       const secrets = makeSecretBox(pluginId, manifest);
       return {
@@ -2021,6 +2056,7 @@
           // dio la película, solo anuncios o un clip corto (señuelo) antes de que el plugin la descarte.
           if (r.ok && text.slice(0, 400).includes("#EXTM3U")) {
             try { diagLog("red", "   ↳ " + hlsSummary(text)); } catch (_) {}
+            if (!withSecret) { try { noteHlsList(pluginId, String(r.url || url), String(url), text, o.headers); } catch (_) {} }
           }
           if (o.stopAt) {
             const i = text.toLowerCase().indexOf(String(o.stopAt).toLowerCase());
@@ -4180,10 +4216,22 @@ async function handle(request) {
       const inst = state.installed.find(x => x.id === pluginId);
       if (!inst) return [];
       setStatus(`Resolviendo enlaces desde ${inst.name}...`);
+      const since = Date.now();
+      const rescued = () => {
+        const r = hlsRescue(pluginId, since);
+        if (!r) return null;
+        const list = [{ url: r.url, label: `${inst.name} · ${r.label}`, mime: r.mime, headers: r.headers }];
+        state.directStreams = list.concat((state.directStreams || []).filter(d => d.url !== r.url));
+        setStatus("1 opción de servidor (lista rescatada)");
+        renderStreamOptions(list, title);
+        return list;
+      };
       try {
         // resolve() puede tardar ~60 s probando servidores (límite propio del plugin)
-        const res = await withTimeout(callPluginFn(inst, "resolve", ref), 65000, inst.name);
-        if (!res) return [];
+        let res;
+        try { res = await withTimeout(callPluginFn(inst, "resolve", ref), 65000, inst.name); }
+        catch (e) { const l = rescued(); if (l) return l; throw e; }
+        if (!res) return rescued() || [];
         const list = [];
         if (res.url) list.push({ url: res.url, label: `${inst.name} · ${res.label || 'Principal'}`, mime: res.mime, headers: res.headers, subtitles: res.subtitles });
         if (Array.isArray(res.copies)) {
@@ -4197,6 +4245,7 @@ async function handle(request) {
             if (a && a.ref) list.push({ lazyRef: a.ref, lazyPluginId: pluginId, label: `${inst.name} · ${a.label || 'Servidor alterno'}` });
           });
         }
+        if (!list.length) { const l = rescued(); if (l) return l; }
         setStatus(list.length ? `${list.length} opciones de servidor` : "Sin enlaces directos");
         // Para que ⏮/⏭ recorran estas opciones del plugin
         state.directStreams = list.concat((state.directStreams || []).filter(d => !list.some(x => x.url && x.url === d.url)));
@@ -5974,12 +6023,13 @@ async function handle(request) {
       const inst = state.installed.find(x => x.id === entry.lazyPluginId);
       if (!inst) return false;
       markUserPlayIntent();
-      try {
-        const res = await withTimeout(callPluginFn(inst, "resolve", entry.lazyRef), 40000, inst.name);
-        if (!res || !res.url) return false;
-        Object.assign(entry, { url: res.url, mime: res.mime, headers: res.headers, subtitles: res.subtitles });
-        return true;
-      } catch (_) { return false; }
+      const since = Date.now();
+      let res = null;
+      try { res = await withTimeout(callPluginFn(inst, "resolve", entry.lazyRef), 40000, inst.name); } catch (_) {}
+      if (!res || !res.url) res = hlsRescue(inst.id, since);
+      if (!res || !res.url) return false;
+      Object.assign(entry, { url: res.url, mime: res.mime, headers: res.headers, subtitles: res.subtitles });
+      return true;
     }
     // ⏮ Anterior / Siguiente ⏭: recorre los enlaces directos (incluidas las
     // alternativas por resolver del plugin) o, en una página embed, los servidores web
