@@ -371,6 +371,13 @@
     .subs-opt { display: block; width: 100%; text-align: left; background: var(--panel-alt); color: var(--text); border: 2px solid var(--border); border-radius: 10px; padding: 10px 14px; margin-bottom: 6px; font-size: 14px; font-weight: 600; cursor: pointer; }
     .subs-opt.active { border-color: var(--green); }
     .subs-note { font-size: 12px; color: var(--muted); margin: 4px 2px 10px; }
+    /* Puntero virtual sobre la página del servidor */
+    #vCursor { position: absolute; left: 0; top: 0; z-index: 9; width: 30px; height: 30px; margin: -3px 0 0 -3px; pointer-events: none;
+      background: no-repeat center/contain url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3 2l7 19 2.6-7.4L20 11z' fill='%23fff' stroke='%23000' stroke-width='1.4' stroke-linejoin='round'/%3E%3C/svg%3E");
+      filter: drop-shadow(0 0 4px rgba(0,0,0,.9)); transition: transform .06s linear; }
+    #vCursor.click::after { content: ""; position: absolute; left: -10px; top: -10px; width: 26px; height: 26px; border-radius: 50%; border: 3px solid #e50914; animation: vclick .35s ease-out forwards; }
+    @keyframes vclick { from { opacity: 1; transform: scale(.4); } to { opacity: 0; transform: scale(1.6); } }
+    #playerOverlay.pointer-mode .player-hud { display: none; }
     .player-hud .btn-group { flex-wrap: nowrap; flex-shrink: 0; }
     .hud-info { flex: 1; min-width: 0; }
     .hud-progress { display: flex; align-items: center; gap: 12px; margin-top: 10px; font-size: 13px; color: var(--muted); }
@@ -506,7 +513,9 @@
         <button class="action-btn small focusable embed-only" id="playerDirectBtn">⚡ Buscar directo</button>
         <button class="action-btn small focusable embed-only" id="playerBrowserBtn">🌐 Navegador TV</button>
         <button class="action-btn secondary small focusable video-only" id="playerSubsBtn">💬 Subtítulos</button>
-        <button class="action-btn blue small focusable" id="playerNextServerBtn">🔄 Siguiente</button>
+        <button class="action-btn small focusable embed-only" id="playerPointerBtn">🖱 Puntero</button>
+        <button class="action-btn blue small focusable" id="playerPrevServerBtn">⏮ Anterior</button>
+        <button class="action-btn blue small focusable" id="playerNextServerBtn">Siguiente ⏭</button>
         <button class="action-btn secondary small focusable" id="playerNativeHandoffBtn">🟡 Nativo</button>
         <button class="action-btn secondary small focusable" id="closePlayerBtn">✖ Cerrar</button>
       </div>
@@ -729,7 +738,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r18-2026-11-04";
+    const BUILD_TAG = "r19-2026-11-04";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -4005,6 +4014,8 @@ export default {
           });
         }
         setStatus(list.length ? `${list.length} opciones de servidor` : "Sin enlaces directos");
+        // Para que ⏮/⏭ recorran estas opciones del plugin
+        state.directStreams = list.concat((state.directStreams || []).filter(d => !list.some(x => x.url && x.url === d.url)));
         renderStreamOptions(list, title);
         return list;
       } catch (e) {
@@ -4470,13 +4481,13 @@ export default {
       // Iframes y videos que aparecen después
       function sweep(root) {
         try {
-          if (root.tagName === "IFRAME" && root.getAttribute("src") && root.getAttribute("src") !== "about:blank") { frame(root.getAttribute("src")); blank(root); }
+          if (root.tagName === "IFRAME" && root.getAttribute("src") && root.getAttribute("src") !== "about:blank") { if (cfg.pointer) requestFrame(root, root.getAttribute("src")); else { frame(root.getAttribute("src")); blank(root); } }
           if ((root.tagName === "VIDEO" || root.tagName === "SOURCE") && root.src) media(root.src, "video");
           if (root.querySelectorAll) {
             var fs = root.querySelectorAll("iframe[src],iframe[data-src]");
             for (var i = 0; i < fs.length; i++) {
               var fu = fs[i].getAttribute("src") || fs[i].getAttribute("data-src");
-              if (fu && fu !== "about:blank") { frame(fu); blank(fs[i]); }
+              if (fu && fu !== "about:blank") { if (cfg.pointer) requestFrame(fs[i], fu); else { frame(fu); blank(fs[i]); } }
             }
             var vs = root.querySelectorAll("video[src],source[src]");
             for (var j = 0; j < vs.length; j++) media(vs[j].getAttribute("src"), "video");
@@ -4509,6 +4520,57 @@ export default {
           }
         } catch (e) {}
       }, 1200);
+      // ---------- Modo puntero (la persona mueve un cursor con el control) ----------
+      // Marcos internos: se piden a la app y se cargan aquí con el mismo código
+      // espía (dirección "f1/f2"); los mensajes de los hijos se reenvían hacia arriba.
+      var MYPATH = cfg.path || "", kids = {}, kidSeq = 0;
+      function requestFrame(el, u) {
+        if (!cfg.pointer || el.getAttribute("data-kfid")) return;
+        var id = "f" + (++kidSeq);
+        el.setAttribute("data-kfid", id);
+        kids[id] = el;
+        try { el.removeAttribute("src"); el.removeAttribute("data-src"); } catch (e) {}
+        post({ frameReq: abs(u), path: MYPATH ? MYPATH + "/" + id : id });
+      }
+      function synthClick(el, x, y) {
+        var o = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, view: window, button: 0, buttons: 1, pointerType: "mouse", isPrimary: true };
+        ["pointerover", "pointerenter", "mouseover", "pointermove", "mousemove", "pointerdown", "mousedown"].forEach(function (t) {
+          try { el.dispatchEvent(/^pointer/.test(t) && window.PointerEvent ? new PointerEvent(t, o) : new MouseEvent(t, o)); } catch (e) {}
+        });
+        try { if (el.focus) el.focus(); } catch (e) {}
+        o.buttons = 0;
+        ["pointerup", "mouseup", "click"].forEach(function (t) {
+          try { el.dispatchEvent(/^pointer/.test(t) && window.PointerEvent ? new PointerEvent(t, o) : new MouseEvent(t, o)); } catch (e) {}
+        });
+        if (el.tagName === "VIDEO") { try { var pp = el.paused ? el.play() : el.pause(); if (pp && pp.catch) pp.catch(function () {}); } catch (e) {} }
+      }
+      if (cfg.pointer) window.addEventListener("message", function (ev) {
+        var d = ev.data;
+        if (!d) return;
+        // del hijo hacia la app: reenviar
+        if (d.__kinoCapture === TOKEN && ev.source !== parent) { try { parent.postMessage(d, "*"); } catch (e) {} return; }
+        if (d.__kinoPointer !== TOKEN) return;
+        if (d.type === "frameHtml") {
+          var rel = MYPATH ? d.target.slice(MYPATH.length + 1) : d.target;
+          var segs = rel.split("/"), kid = kids[segs[0]];
+          if (!kid) return;
+          if (segs.length === 1) { try { kid.srcdoc = d.html; } catch (e) {} }
+          else { try { kid.contentWindow.postMessage(d, "*"); } catch (e) {} }
+          return;
+        }
+        if (d.type === "click" || d.type === "move") {
+          var el = document.elementFromPoint(d.x, d.y);
+          if (el && el.tagName === "IFRAME" && el.getAttribute("data-kfid")) {
+            var r = el.getBoundingClientRect();
+            try { el.contentWindow.postMessage({ __kinoPointer: TOKEN, type: d.type, x: d.x - r.left, y: d.y - r.top }, "*"); } catch (e) {}
+            return;
+          }
+          if (el && d.type === "click") synthClick(el, d.x, d.y);
+          else if (el) { try { el.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: d.x, clientY: d.y })); } catch (e) {} }
+          return;
+        }
+        if (d.type === "scroll") { try { window.scrollBy(0, d.dy); } catch (e) {} }
+      });
       post({ ready: 1 });
     }
 
@@ -4689,6 +4751,7 @@ export default {
     function startEmbedPlayback(src, title) {
       playbackRun++; // cancela los intentos pendientes de un video anterior
       Subs.run++; Subs.clear(); // una página embed no admite subtítulos propios
+      Pointer.close(true);
       state.activeVideoUrl = src.url;
       document.getElementById("nowPlayingTitle").textContent = `${title || "Reproduciendo"} — ${src.name}`;
       document.getElementById("nowPlayingSub").textContent = "Servidor web: su botón ▶ solo se pulsa con puntero. Si no arranca solo: ⚡ Buscar directo o 🌐 Navegador TV · ▼: ocultar barra · Back: Salir";
@@ -4716,7 +4779,7 @@ export default {
       extractFromEmbed(url, { deep: false }).then(media => {
         if (!playerUI.isOpen() || !playerUI.isEmbed() || state.activeVideoUrl !== url) return;
         if (!media.length) {
-          playerUI.osd("Este servidor necesita puntero: usa 🔄 Siguiente o ⚡ Buscar directo");
+          playerUI.osd("Este servidor necesita puntero: pulsa 🖱 Puntero (o ⏭ Siguiente)");
           return;
         }
         playerUI.osd("⚡ Video encontrado: ya se controla con el mando");
@@ -4778,6 +4841,7 @@ export default {
     function startPlayback(url, title, opts = {}) {
       if (!url) { setStatus("No hay URL de stream disponible"); return; }
       const run = ++playbackRun;
+      Pointer.close(true);
       state.activeVideoUrl = url; // URL original (para el pase a nativo y "Siguiente")
       document.getElementById("nowPlayingTitle").textContent = title || "Reproduciendo";
       document.getElementById("nowPlayingSub").textContent = "OK: Pausa/Play · ◀ ▶: 10 s · ▼: ocultar barra · Back: Salir";
@@ -4835,8 +4899,8 @@ export default {
         cleanup();
         stageIdx++;
         if (stageIdx >= stages.length) {
-          setStatus("No se pudo reproducir este enlace — prueba 🔄 Siguiente o 🟡 Nativo VIDAA", { priority: true });
-          document.getElementById("nowPlayingSub").textContent = "✗ Este enlace no se pudo reproducir en el TV · 🔄 Siguiente para probar otro · detalles en 🩺 Diagnóstico";
+          setStatus("No se pudo reproducir este enlace — prueba ⏭ Siguiente o 🟡 Nativo VIDAA", { priority: true });
+          document.getElementById("nowPlayingSub").textContent = "✗ Este enlace no se pudo reproducir en el TV · ⏭ Siguiente para probar otro · detalles en 🩺 Diagnóstico";
           playerUI.osd("✗ No se pudo reproducir este enlace");
           playerUI.show(false);
           playerUI.el("playerNextServerBtn").focus();
@@ -5003,6 +5067,7 @@ export default {
     // Teclas del reproductor. Devuelve true si la tecla ya se atendió.
     function handlePlayerKey(e) {
       if (!playerUI.isOpen()) return false;
+      if (Pointer.key(e)) return true; // modo puntero: flechas mueven el cursor, OK hace clic
       const k = e.key, c = e.keyCode;
       const media =
         (k === "MediaPlayPause" || c === 10252 || c === 179) ? "toggle" :
@@ -5288,6 +5353,136 @@ export default {
     Subs.applySize();
     document.getElementById("playerSubsBtn").addEventListener("click", () => Subs.isOpen() ? Subs.closePanel() : Subs.openPanel());
 
+    // =========================================================================
+    // PUNTERO VIRTUAL
+    // La página del servidor se muestra dentro de la caja de arena (donde la app
+    // controla su código) y un cursor se mueve con las flechas; OK hace clic en
+    // ese punto, también dentro de los marcos internos del reproductor. En
+    // cuanto la página pide el video, se pasa solo al reproductor propio.
+    // Límite honesto: son clics "sintéticos"; los captchas suelen rechazarlos.
+    // =========================================================================
+    const Pointer = {
+      active: false, token: "", frame: null, cursor: null, x: 0, y: 0,
+      lastKey: "", lastAt: 0, streak: 0, src: null, title: "",
+      buildDoc(url, text, path) {
+        const proxy = state.customProxy || state.lastGoodProxy || "https://api.codetabs.com/v1/proxy?quest=";
+        const cfg = JSON.stringify({ token: this.token, proxy, page: url, custom: !!state.customProxy && proxy === state.customProxy, noClick: true, pointer: true, path: path || "" }).replace(/</g, "\\u003c");
+        const inject = `<base href="${url.replace(/"/g, "&quot;")}"><script>(${kinoCaptureHook.toString()})(${cfg});<\/script>`;
+        let html = String(text || "").replace(/<meta[^>]+http-equiv\s*=\s*["']?content-security-policy[^>]*>/gi, "");
+        html = html.replace(/<iframe\b([^>]*?)\ssrc\s*=/gi, "<iframe$1 data-src="); // la app los carga con el código espía
+        return /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, m => m + inject) : inject + html;
+      },
+      async open(src, title) {
+        if (!src || !src.url) return;
+        markUserPlayIntent();
+        this.close(true);
+        this.src = src; this.title = title || "";
+        this.token = "p" + Math.random().toString(36).slice(2);
+        playerUI.osd("🖱 Abriendo la página con puntero...");
+        const r = await smartFetch(src.url, { timeoutMs: 15000 }).catch(() => null);
+        if (!r || !r.ok || !r.text || looksBlocked(r)) {
+          playerUI.osd(r && looksBlocked(r) ? "✗ La página pide verificación (captcha/Cloudflare)" : "✗ No se pudo abrir la página del servidor");
+          diagLog("puntero", `✗ no se pudo abrir ${src.url.slice(0, 70)}${r ? " (HTTP " + r.status + ")" : ""}`);
+          return;
+        }
+        if (!playerUI.isOpen()) return;
+        // La página embed normal se descarga (no debe sonar por detrás)
+        const iframe = document.getElementById("webPlayerFrame");
+        playerUI.embedActive = false;
+        iframe.src = "about:blank";
+        const ov = document.getElementById("playerOverlay");
+        const f = document.createElement("iframe");
+        f.id = "pointerFrame";
+        f.setAttribute("sandbox", "allow-scripts allow-forms"); // aislada: sin datos de la app, sin ventanas, sin salir de la app
+        f.setAttribute("allow", "autoplay; fullscreen; encrypted-media");
+        f.setAttribute("tabindex", "-1");
+        f.style.cssText = "position:absolute; inset:0; width:100%; height:100%; border:0; background:#000; z-index:3;";
+        f.srcdoc = this.buildDoc(src.url, r.text, "");
+        ov.appendChild(f);
+        const c = document.createElement("div");
+        c.id = "vCursor";
+        ov.appendChild(c);
+        this.frame = f; this.cursor = c; this.active = true;
+        this.x = Math.round(window.innerWidth / 2); this.y = Math.round(window.innerHeight / 2);
+        this.place();
+        ov.classList.add("pointer-mode", "hud-hidden");
+        clearTimeout(playerUI.hideTimer);
+        window.addEventListener("message", this.onMsg);
+        diagLog("puntero", `▶ página abierta con puntero: ${src.url.slice(0, 70)}`);
+        playerUI.osd("🖱 Flechas: mover · OK: clic · CH+/CH−: desplazar · Back: salir");
+      },
+      onMsg: async (ev) => {
+        const P = Pointer, d = ev.data;
+        if (!P.active || !d || d.__kinoCapture !== P.token || ev.source !== (P.frame && P.frame.contentWindow)) return;
+        if (d.frameReq) {
+          // Un marco interno (p. ej. el reproductor real): cargarlo también con el código espía
+          const r = await smartFetch(d.frameReq, { timeoutMs: 15000, headers: { Referer: P.src.url } }).catch(() => null);
+          if (!P.active || !r || !r.ok || !r.text) { diagLog("puntero", `✗ marco interno sin respuesta: ${String(d.frameReq).slice(0, 60)}`); return; }
+          P.frame.contentWindow.postMessage({ __kinoPointer: P.token, type: "frameHtml", target: d.path, html: P.buildDoc(d.frameReq, r.text, d.path) }, "*");
+          return;
+        }
+        if (d.media) {
+          // La página pidió el video: pasar al reproductor propio (controlable)
+          diagLog("puntero", `✓ video capturado con el puntero (${d.why}): ${d.media.slice(0, 80)}`);
+          const src = P.src, title = P.title;
+          P.close();
+          playerUI.osd("⚡ Video encontrado: pasando al reproductor propio");
+          startPlayback(d.media, `${title || "Reproduciendo"} — ${src.name || "Servidor"}`, { mime: /\.mp4(\?|#|$)/i.test(d.media) ? "video/mp4" : "application/vnd.apple.mpegurl", referer: { Referer: src.url } });
+        }
+      },
+      place() {
+        if (!this.cursor) return;
+        this.x = Math.max(0, Math.min(window.innerWidth - 2, this.x));
+        this.y = Math.max(0, Math.min(window.innerHeight - 2, this.y));
+        this.cursor.style.transform = `translate(${this.x}px, ${this.y}px)`;
+      },
+      send(msg) {
+        try { this.frame.contentWindow.postMessage(Object.assign({ __kinoPointer: this.token }, msg), "*"); } catch (_) {}
+      },
+      // Teclas en modo puntero. Devuelve true si la atendió.
+      key(e) {
+        if (!this.active) return false;
+        const k = e.key, c = e.keyCode;
+        const dirs = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+        if (dirs[k]) {
+          e.preventDefault();
+          // Acelera al mantener o repetir la misma flecha
+          const now = Date.now();
+          this.streak = (k === this.lastKey && now - this.lastAt < 350) ? this.streak + 1 : 0;
+          this.lastKey = k; this.lastAt = now;
+          const step = Math.min(10 + this.streak * 7, 90);
+          this.x += dirs[k][0] * step; this.y += dirs[k][1] * step;
+          this.place();
+          this.send({ type: "move", x: this.x, y: this.y });
+          return true;
+        }
+        if (k === "Enter" || c === 13) {
+          e.preventDefault();
+          this.cursor.classList.remove("click"); void this.cursor.offsetWidth; this.cursor.classList.add("click");
+          this.send({ type: "click", x: this.x, y: this.y });
+          return true;
+        }
+        if (k === "PageUp" || c === 427 || c === 33) { e.preventDefault(); this.send({ type: "scroll", dy: -Math.round(window.innerHeight * 0.6) }); return true; }
+        if (k === "PageDown" || c === 428 || c === 34) { e.preventDefault(); this.send({ type: "scroll", dy: Math.round(window.innerHeight * 0.6) }); return true; }
+        return false;
+      },
+      close(silent) {
+        window.removeEventListener("message", this.onMsg);
+        if (this.frame) { try { this.frame.srcdoc = ""; this.frame.remove(); } catch (_) {} }
+        if (this.cursor) this.cursor.remove();
+        this.frame = null; this.cursor = null;
+        const was = this.active;
+        this.active = false;
+        document.getElementById("playerOverlay").classList.remove("pointer-mode");
+        if (was && !silent && playerUI.isOpen()) {
+          // Volver a mostrar la página normal del servidor (se había descargado)
+          if (this.src && playerUI.isEmbed()) { const ifr = document.getElementById("webPlayerFrame"); playerUI.embedActive = true; ifr.src = this.src.url; }
+          playerUI.show(true);
+          playerUI.osd("🖱 Puntero cerrado");
+        }
+      }
+    };
+
     function handoffToVidaaNativePlayer(url, title) {
       if (!url) return;
       try {
@@ -5381,6 +5576,7 @@ export default {
           <div class="btn-group">
             <button class="action-btn small focusable" id="ncRetryBtn">🔄 Buscar otra vez en plugins</button>
             <button class="action-btn blue small focusable" id="ncBrowserBtn">🌐 Abrir en Navegador TV (con puntero)</button>
+            <button class="action-btn small focusable" id="ncPointerBtn">🖱 Abrir con puntero virtual</button>
             <button class="action-btn secondary small focusable" id="ncEmbedBtn">Abrir servidor web aquí igualmente</button>
             <button class="action-btn secondary small focusable" id="ncDeepBtn">🧪 Intentar sacar el video (experimental)</button>
           </div>
@@ -5397,6 +5593,11 @@ export default {
         const d = (state.directStreams || []).find(x => x.url);
         if (d && state.selectedItem === it) startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime, referer: refOf(d), subtitles: d.subtitles });
         else setStatus("No se pudo sacar el video de los servidores web", { priority: true });
+      });
+      document.getElementById("ncPointerBtn").addEventListener("click", () => {
+        state.currentSourceIndex = 0;
+        startPlaybackSource(state.activeSources[0], it.title); // abre el servidor web...
+        Pointer.open(state.activeSources[0], it.title);        // ...y encima, el puntero
       });
       document.getElementById("ncEmbedBtn").addEventListener("click", () => {
         state.currentSourceIndex = 0;
@@ -5477,6 +5678,7 @@ export default {
       // dispara un src vacío reintenta vía proxy y vuelve a abrir el player.
       playbackRun++; // cancela los intentos pendientes del reproductor
       Subs.run++; Subs.clear();
+      Pointer.close(true);
       video.onerror = null;
       video.onloadeddata = null;
       if (state.hlsInstance) { state.hlsInstance.destroy(); state.hlsInstance = null; }
@@ -5496,21 +5698,28 @@ export default {
     });
 
     // Cicla por los servidores de la ficha (embed o directos) sin salir del player
-    document.getElementById("playerNextServerBtn").addEventListener("click", () => {
-      // Reproduciendo un enlace directo: pasar al siguiente enlace directo
+    // ⏮ Anterior / Siguiente ⏭: recorre los enlaces directos (si se ve uno) o los servidores web
+    function cycleServer(delta) {
       const directs = (state.directStreams || []).filter(x => x.url);
       if (!playerUI.isEmbed() && directs.length > 1) {
-        const cur = directs.findIndex(x => x.url === state.activeVideoUrl);
-        const nxt = directs[(cur + 1) % directs.length];
-        playerUI.osd(`🔄 ${nxt.label}`);
+        const cur = Math.max(0, directs.findIndex(x => x.url === state.activeVideoUrl));
+        const nxt = directs[(cur + delta + directs.length) % directs.length];
+        playerUI.osd(`${delta > 0 ? "⏭" : "⏮"} ${nxt.label}`);
         startPlayback(nxt.url, `${state.selectedItem ? state.selectedItem.title : "Kino TV"} (${nxt.label})`, { mime: nxt.mime, referer: refOf(nxt), subtitles: nxt.subtitles });
         return;
       }
-      if (!state.activeSources.length) { setStatus("No hay más servidores en la lista"); return; }
-      state.currentSourceIndex = (state.currentSourceIndex + 1) % state.activeSources.length;
+      if (!state.activeSources.length) { setStatus("No hay más servidores en la lista"); playerUI.osd("No hay más servidores"); return; }
+      state.currentSourceIndex = (state.currentSourceIndex + delta + state.activeSources.length) % state.activeSources.length;
       const src = state.activeSources[state.currentSourceIndex];
       setStatus(`Probando ${src.name}…`);
+      playerUI.osd(`${delta > 0 ? "⏭" : "⏮"} ${src.name} (${state.currentSourceIndex + 1}/${state.activeSources.length})`);
       startPlaybackSource(src, state.selectedItem ? state.selectedItem.title : "Kino TV");
+    }
+    document.getElementById("playerNextServerBtn").addEventListener("click", () => cycleServer(1));
+    document.getElementById("playerPrevServerBtn").addEventListener("click", () => cycleServer(-1));
+    document.getElementById("playerPointerBtn").addEventListener("click", () => {
+      const src = state.activeSources[state.currentSourceIndex] || (state.activeVideoUrl ? { url: state.activeVideoUrl, name: "Servidor" } : null);
+      Pointer.open(src, state.selectedItem ? state.selectedItem.title : "");
     });
 
     document.getElementById("exitAppBtn").addEventListener("click", () => {
@@ -5612,6 +5821,7 @@ export default {
         if (document.getElementById("playerOverlay").classList.contains("open")) {
           e.preventDefault();
           if (Subs.isOpen()) { Subs.closePanel(); return; } // Back cierra primero el panel de subtítulos
+          if (Pointer.active) { Pointer.close(); return; }  // y luego el modo puntero
           document.getElementById("closePlayerBtn").click();
           return;
         }
