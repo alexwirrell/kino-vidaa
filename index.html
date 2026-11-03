@@ -166,6 +166,18 @@
       grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
       gap: 16px;
     }
+    /* Filas horizontales del Inicio: ▲▼ salta de fila en fila, ◀ ▶ recorre la fila */
+    .cards-row {
+      display: flex;
+      gap: 16px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding: 8px 6px 12px;
+      scrollbar-width: none;
+    }
+    .cards-row::-webkit-scrollbar { display: none; }
+    .cards-row .card { flex: 0 0 165px; }
+    .live-item { cursor: pointer; border: 2px solid var(--border); }
     .card {
       background: var(--card);
       border: 2px solid transparent;
@@ -441,6 +453,7 @@
           <button class="action-btn secondary focusable" id="closeDetailBtn">⬅ Volver</button>
         </div>
         <div id="episodesSection" style="margin-top: 18px;"></div>
+        <div id="directStreamsList" class="streams-box"></div>
         <div id="streamsList" class="streams-box"></div>
       </div>
     </div>
@@ -462,7 +475,7 @@
   <!-- Reproductor de Video (HTML5 directo o iframe de servidores embed) -->
   <div class="overlay mode-video" id="playerOverlay">
     <video id="videoPlayer" autoplay playsinline></video>
-    <iframe id="webPlayerFrame" style="display:none;" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+    <iframe id="webPlayerFrame" tabindex="-1" style="display:none;" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>
     <div class="player-osd" id="playerOsd"></div>
     <div class="player-hud" id="playerHud">
       <div class="hud-info">
@@ -477,7 +490,8 @@
         <button class="action-btn small focusable video-only" id="playerRewBtn">⏪ 10 s</button>
         <button class="action-btn small focusable video-only" id="playerPlayPauseBtn">⏸ Pausa</button>
         <button class="action-btn small focusable video-only" id="playerFwdBtn">10 s ⏩</button>
-        <button class="action-btn small focusable embed-only" id="playerFocusFrameBtn">🖱 Controlar video</button>
+        <button class="action-btn small focusable embed-only" id="playerDirectBtn">⚡ Buscar directo</button>
+        <button class="action-btn small focusable embed-only" id="playerBrowserBtn">🌐 Navegador TV</button>
         <button class="action-btn blue small focusable" id="playerNextServerBtn">🔄 Siguiente</button>
         <button class="action-btn secondary small focusable" id="playerNativeHandoffBtn">🟡 Nativo</button>
         <button class="action-btn secondary small focusable" id="closePlayerBtn">✖ Cerrar</button>
@@ -636,7 +650,9 @@
       installed: loadStore("kino_installed_v2", DEFAULT_INSTALLED),
       pluginConfigs: loadStore("kino_plugin_configs", {}),
       loadedModules: {}, // id -> { manifest, exports }
-      homeRows: [],
+      homeRows: [], // se llena con la caché al iniciar (ver loadHomeCache)
+      liveLoading: false,
+      liveGroup: "all",
       liveChannels: loadStore("kino_m3u_v2", [
         { name: "DW Español (En Vivo)", url: "https://dwamdstream104.akamaized.net/hls/live/2015530/dwstream104/index.m3u8", group: "Noticias" }
       ]),
@@ -647,6 +663,8 @@
       hlsInstance: null,
       // Vía "sin proxy": catálogo Cinemeta + servidores embed en iframe
       activeSources: [],
+      directStreams: [], // enlaces directos (mp4/m3u8) encontrados para la ficha abierta
+      directSearch: null,
       currentSourceIndex: 0,
       selectedSeason: 1,
       selectedEpisode: 1
@@ -914,27 +932,49 @@
       let lastAny = null;
       // Si TODOS los proxies están marcados como caídos, se reintenta con todos igualmente:
       // la marca es una pista, no una condena (una sola URL que falle no debe vetar el proxy).
-      const anyAlive = proxies.some(p => Date.now() - (state.deadProxies[p] || 0) >= 10 * 60 * 1000);
-      for (const p of proxies) {
-        // Proxy marcado como caído hace menos de 10 min: se salta para no pagar su timeout en cada petición
-        const deadAt = state.deadProxies[p] || 0;
-        if (anyAlive && Date.now() - deadAt < 10 * 60 * 1000) continue;
+      const isDead = p => Date.now() - (state.deadProxies[p] || 0) < 10 * 60 * 1000;
+      const anyAlive = proxies.some(p => !isDead(p));
+      const usable = proxies.filter(p => !anyAlive || !isDead(p));
+      const attempt = async p => {
         try {
           const r = await tryProxy(p);
-          if (!r || r.status <= 0) { state.deadProxies[p] = Date.now(); continue; }
+          if (!r || r.status <= 0) { state.deadProxies[p] = Date.now(); return null; }
           lastAny = r;
-          if (r.ok && !looksBlocked(r)) {
-            // Recuerda el proxy que sí funcionó para intentarlo primero la próxima vez
-            if (state.lastGoodProxy !== p) {
-              state.lastGoodProxy = p;
-              saveStore("kino_last_proxy", p);
-            }
-            return r;
-          }
+          if (r.ok && !looksBlocked(r)) return r;
           if (looksBlocked(r)) diagLog("red", `   ↳ respuesta inutilizable (reto Cloudflare o proxy saturado)`);
-          if (!looksBlocked(r) && !firstUsable) firstUsable = r;
+          else if (!firstUsable) firstUsable = r;
+          return null;
         } catch (_) {
           state.deadProxies[p] = Date.now(); // sin respuesta o timeout: no insistir por un rato
+          return null;
+        }
+      };
+      const remember = p => {
+        // Recuerda el proxy que sí funcionó para intentarlo primero la próxima vez
+        if (state.lastGoodProxy !== p) { state.lastGoodProxy = p; saveStore("kino_last_proxy", p); }
+      };
+      // 1) El proxy propio y el último que funcionó, primero (suelen bastar)
+      const preferred = usable.filter(p => p === state.customProxy || p === state.lastGoodProxy);
+      for (const p of preferred) {
+        const r = await attempt(p);
+        if (r) { remember(p); return r; }
+      }
+      // 2) El resto: en GET se prueban todos A LA VEZ y gana el primero que
+      //    responde bien (antes, uno tras otro con 15 s de espera cada uno).
+      const rest = usable.filter(p => !preferred.includes(p));
+      if (rest.length && method === "GET") {
+        const winner = await new Promise(resolve => {
+          let left = rest.length;
+          rest.forEach(p => attempt(p).then(r => {
+            if (r) resolve({ p, r });
+            else if (--left === 0) resolve(null);
+          }));
+        });
+        if (winner) { remember(winner.p); return winner.r; }
+      } else {
+        for (const p of rest) {
+          const r = await attempt(p);
+          if (r) { remember(p); return r; }
         }
       }
       if (firstUsable) return firstUsable;
@@ -1495,124 +1535,219 @@
     // =========================================================================
     // 4. CARGA DE INICIO (HOME), CANALES EN VIVO Y BÚSQUEDA MULTIFUENTE
     // =========================================================================
+    // Ejecuta tareas con un máximo de N a la vez (antes todo iba en fila, uno
+    // por uno, y un solo plugin lento retrasaba todo el Inicio)
+    async function runPool(items, limit, worker) {
+      let next = 0;
+      const runners = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+        while (next < items.length) {
+          const idx = next++;
+          try { await worker(items[idx], idx); } catch (_) {}
+        }
+      });
+      await Promise.all(runners);
+    }
+
+    // Caché del Inicio: al abrir la app se muestran al instante las filas de la
+    // última vez mientras se actualizan en segundo plano.
+    const HOME_CACHE_KEY = "kino_home_cache_v1";
+    function loadHomeCache() {
+      const c = loadStore(HOME_CACHE_KEY, null);
+      if (!c || !Array.isArray(c.rows)) return [];
+      if (Date.now() - (c.t || 0) > 3 * 24 * 3600 * 1000) return [];
+      return c.rows;
+    }
+    function saveHomeCache(rows) {
+      try {
+        const slim = rows.slice(0, 40).map(r => Object.assign({}, r, {
+          items: r.items.slice(0, 20).map(it => { const o = Object.assign({}, it); delete o.synopsis; return o; })
+        }));
+        localStorage.setItem(HOME_CACHE_KEY, JSON.stringify({ t: Date.now(), rows: slim }));
+      } catch (_) { /* sin espacio: no pasa nada */ }
+    }
+
+    function mapPluginHomeRows(inst, res) {
+      const rowsList = Array.isArray(res) ? res : (res && Array.isArray(res.rows) ? res.rows : []);
+      const out = [];
+      rowsList.forEach(r => {
+        const items = r && Array.isArray(r.items) ? r.items : [];
+        if (!items.length) return;
+        out.push({
+          row: `${inst.name} · ${r.title || r.name || "Destacados"}`,
+          sourceId: inst.id,
+          sourceName: inst.name,
+          items: items.slice(0, 30).map(it => ({
+            id: `${inst.id}_${it.id || it.ref || it.title}`,
+            ref: it.ref || it.id,
+            title: it.title || it.name || "Sin título",
+            year: it.year || "",
+            poster: it.poster || it.image || it.cover || "",
+            backdrop: it.backdrop || "",
+            synopsis: it.overview || it.synopsis || it.description || "",
+            kind: it.kind || it.type || "movie",
+            video: it.url || it.video || "",
+            pluginId: inst.id,
+            source: inst.name
+          }))
+        });
+      });
+      return out;
+    }
+
     let homeRefreshRun = 0;
     async function refreshHomeCatalog() {
       // Si se instala/desinstala durante una recarga, la recarga vieja (con la
       // lista anterior) terminaba después y pisaba las filas nuevas.
       const run = ++homeRefreshRun;
-      setStatus("Cargando filas desde tus plugins instalados...");
-      const allRows = [];
-
-      // Vía sin proxy: tendencias de Cinemeta primero (CORS abierto, nunca se cuelga)
-      try {
-        const [cmMovies, cmSeries] = await withTimeout(
-          Promise.all([fetchCinemetaCatalog("movie"), fetchCinemetaCatalog("series")]),
-          25000, "cinemeta home");
-        if (cmMovies.length) allRows.push({ row: "⭐ Películas Populares (sin proxy)", sourceName: "Cinemeta", items: cmMovies.slice(0, 24) });
-        if (cmSeries.length) allRows.push({ row: "📺 Series Populares (sin proxy)", sourceName: "Cinemeta", items: cmSeries.slice(0, 24) });
-      } catch (_) {}
-
-      for (const inst of state.installed.slice()) {
+      const active = state.installed.filter(i => i.enabled !== false && (i.stremio || i.address));
+      const total = active.length + 1;
+      let done = 0;
+      setStatus(`Cargando Inicio... (0/${total})`);
+      // Un "hueco" por fuente, en el orden de siempre; mientras una fuente no
+      // responde se muestran sus filas guardadas de la última vez.
+      const slots = new Array(total).fill(null);
+      const previous = state.homeRows.slice();
+      const sourceIds = ["cinemeta-home"].concat(active.map(i => i.id));
+      const compose = () => {
+        const rows = [];
+        slots.forEach((sl, i) => {
+          if (sl) rows.push(...sl);
+          else rows.push(...previous.filter(r => r.sourceId === sourceIds[i]));
+        });
+        return rows;
+      };
+      let renderTimer = null;
+      const publish = () => {
         if (run !== homeRefreshRun) return;
-        if (inst.enabled === false || !isInstalled(inst.id)) continue;
+        state.homeRows = compose();
+        if (state.view === "home") renderView();
+      };
+      const finished = () => {
+        done++;
+        if (run === homeRefreshRun) setStatus(`Cargando Inicio... (${done}/${total})`);
+        // Se redibuja a lo sumo cada 0.8 s para no interrumpir la navegación
+        if (!renderTimer) renderTimer = setTimeout(() => { renderTimer = null; publish(); }, 800);
+      };
+
+      const cinemetaTask = (async () => {
+        try {
+          const [cmMovies, cmSeries] = await withTimeout(
+            Promise.all([fetchCinemetaCatalog("movie"), fetchCinemetaCatalog("series")]),
+            20000, "cinemeta home");
+          const rows = [];
+          if (cmMovies.length) rows.push({ row: "⭐ Películas Populares (sin proxy)", sourceId: "cinemeta-home", sourceName: "Cinemeta", items: cmMovies.slice(0, 24) });
+          if (cmSeries.length) rows.push({ row: "📺 Series Populares (sin proxy)", sourceId: "cinemeta-home", sourceName: "Cinemeta", items: cmSeries.slice(0, 24) });
+          slots[0] = rows.length ? rows : null; // sin respuesta: se conservan las filas anteriores
+        } catch (_) { slots[0] = null; }
+        finished();
+      })();
+
+      const pluginsTask = runPool(active, 4, async (inst, i) => {
+        if (run !== homeRefreshRun || !isInstalled(inst.id)) { slots[i + 1] = []; finished(); return; }
         try {
           if (inst.stremio) {
-            const sRows = await withTimeout(fetchStremioAddonHome(inst), 40000, inst.name);
-            allRows.push(...sRows);
-          } else if (inst.address) {
-            const res = await withTimeout(callPluginFn(inst, "home"), 45000, inst.name);
-            const rowsList = Array.isArray(res) ? res : (res && Array.isArray(res.rows) ? res.rows : []);
-            rowsList.forEach(r => {
-              const items = Array.isArray(r.items) ? r.items : [];
-              if (!items.length) return;
-              allRows.push({
-                row: `${inst.name} · ${r.title || r.name || "Destacados"}`,
-                sourceId: inst.id,
-                sourceName: inst.name,
-                items: items.slice(0, 30).map(it => ({
-                  id: `${inst.id}_${it.id || it.ref || it.title}`,
-                  ref: it.ref || it.id,
-                  title: it.title || it.name || "Sin título",
-                  year: it.year || "",
-                  poster: it.poster || it.image || it.cover || "",
-                  backdrop: it.backdrop || "",
-                  synopsis: it.overview || it.synopsis || it.description || "",
-                  kind: it.kind || it.type || "movie",
-                  video: it.url || it.video || "",
-                  pluginId: inst.id,
-                  source: inst.name
-                }))
-              });
-            });
-
-            // Canales del plugin para En Vivo: contrato antiguo `channels()` y el
-            // actual de Kino `liveCategories()` + `liveChannels({ categoryId })`
-            // (YojaTV, TV Latam...), que antes se ignoraba y no salía ningún canal.
-            const addChannel = (ch, group) => {
-              if (!ch) return;
-              const name = ch.name || ch.title || "Canal";
-              const url = ch.url || (ch.stream && ch.stream.url) || "";
-              const ref = ch.ref || ch.id || "";
-              // Comparar por el nombre ya normalizado (antes los canales con `title`
-              // se duplicaban en cada recarga del Inicio)
-              const exists = state.liveChannels.some(x => x.pluginId === inst.id && (ref ? x.ref === ref : x.name === name));
-              if (exists) return;
-              state.liveChannels.push({
-                name,
-                group: ch.group || group || inst.name,
-                logo: ch.logo || ch.poster || ch.image || "",
-                url,
-                ref,
-                pluginId: inst.id
-              });
-            };
-            try {
-              const chRes = await withTimeout(callPluginFn(inst, "channels"), 25000, inst.name);
-              const chList = Array.isArray(chRes) ? chRes : (chRes && Array.isArray(chRes.channels) ? chRes.channels : []);
-              chList.slice(0, 120).forEach(ch => addChannel(ch));
-            } catch (_) {}
-            try {
-              const mod = state.loadedModules[inst.id];
-              if (mod && mod.exports && typeof mod.exports.liveChannels === "function") {
-                let cats = [];
-                if (typeof mod.exports.liveCategories === "function") {
-                  const cRes = await withTimeout(callPluginFn(inst, "liveCategories"), 25000, inst.name);
-                  cats = Array.isArray(cRes) ? cRes : (cRes && Array.isArray(cRes.items) ? cRes.items : []);
-                }
-                if (!cats.length) cats = [{ id: undefined, title: inst.name }];
-                let total = 0;
-                for (const cat of cats.slice(0, 12)) {
-                  if (total >= 300 || run !== homeRefreshRun) break;
-                  let cursor;
-                  for (let page = 0; page < 5 && total < 300; page++) {
-                    const lRes = await withTimeout(callPluginFn(inst, "liveChannels", { categoryId: cat.id, cursor }), 25000, inst.name);
-                    const items = Array.isArray(lRes) ? lRes : (lRes && Array.isArray(lRes.items) ? lRes.items : []);
-                    items.forEach(ch => { addChannel(ch, cat.title || cat.name); total++; });
-                    cursor = lRes && lRes.next;
-                    if (!cursor || !items.length) break;
-                  }
-                }
-              }
-            } catch (_) {}
+            slots[i + 1] = await withTimeout(fetchStremioAddonHome(inst), 30000, inst.name);
+          } else {
+            const res = await withTimeout(callPluginFn(inst, "home"), 30000, inst.name);
+            slots[i + 1] = mapPluginHomeRows(inst, res);
           }
         } catch (err) {
-          console.warn(`Error cargando Home de ${inst.name}:`, err);
+          slots[i + 1] = null; // falló o tardó: se siguen mostrando sus filas anteriores
           diagLog("error", `Inicio de ${inst.name} → ${(err && (err.userMessage || err.message)) || err}`);
         }
-      }
+        finished();
+      });
 
+      await Promise.all([cinemetaTask, pluginsTask]);
       if (run !== homeRefreshRun) return;
-      state.homeRows = allRows;
-      setStatus(allRows.length ? `Inicio actualizado (${allRows.length} filas activas)` : "Instala o activa plugins en la Tienda para poblar tu Inicio");
-      if (state.view === "home") renderView();
+      clearTimeout(renderTimer);
+      renderTimer = null;
+      publish();
+      if (state.homeRows.length) saveHomeCache(state.homeRows); // sin red no se borra la caché
+      setStatus(state.homeRows.length ? `Inicio actualizado (${state.homeRows.length} filas)` : "Instala o activa plugins en la Tienda para poblar tu Inicio");
+      // Los canales en vivo se cargan aparte, sin bloquear el Inicio
+      refreshLiveChannels();
+    }
+
+    // Canales de los plugins para En Vivo: contrato antiguo `channels()` y el
+    // actual de Kino `liveCategories()` + `liveChannels({ categoryId })`.
+    let liveRefreshRun = 0;
+    async function refreshLiveChannels() {
+      const run = ++liveRefreshRun;
+      const plugins = state.installed.filter(i => i.enabled !== false && i.address);
+      state.liveLoading = true;
+      if (state.view === "livetv") renderView();
+      await runPool(plugins, 3, async inst => {
+        if (run !== liveRefreshRun || !isInstalled(inst.id)) return;
+        const addChannel = (ch, group) => {
+          if (!ch) return;
+          const name = ch.name || ch.title || "Canal";
+          const url = ch.url || (ch.stream && ch.stream.url) || "";
+          const ref = ch.ref || ch.id || "";
+          const exists = state.liveChannels.some(x => x.pluginId === inst.id && (ref ? x.ref === ref : x.name === name));
+          if (exists) return;
+          state.liveChannels.push({ name, group: ch.group || group || inst.name, logo: ch.logo || ch.poster || ch.image || "", url, ref, pluginId: inst.id });
+        };
+        let mod;
+        try { mod = await withTimeout(loadGitHubPlugin(inst), 30000, inst.name); } catch (_) { return; }
+        const ex = (mod && mod.exports) || {};
+        if (typeof ex.channels === "function") {
+          try {
+            const chRes = await withTimeout(callPluginFn(inst, "channels"), 15000, inst.name);
+            const chList = Array.isArray(chRes) ? chRes : (chRes && Array.isArray(chRes.channels) ? chRes.channels : []);
+            chList.slice(0, 200).forEach(ch => addChannel(ch));
+          } catch (_) {}
+        }
+        if (typeof ex.liveChannels === "function") {
+          let cats = [];
+          if (typeof ex.liveCategories === "function") {
+            try {
+              const cRes = await withTimeout(callPluginFn(inst, "liveCategories"), 15000, inst.name);
+              cats = Array.isArray(cRes) ? cRes : (cRes && Array.isArray(cRes.items) ? cRes.items : []);
+            } catch (_) {}
+          }
+          if (!cats.length) cats = [{ id: undefined, title: inst.name }];
+          // Categorías en paralelo (antes: hasta 60 llamadas seguidas por plugin)
+          await runPool(cats.slice(0, 12), 4, async cat => {
+            let cursor;
+            for (let page = 0; page < 3; page++) {
+              if (run !== liveRefreshRun) return;
+              const lRes = await withTimeout(callPluginFn(inst, "liveChannels", { categoryId: cat.id, cursor }), 15000, inst.name);
+              const items = Array.isArray(lRes) ? lRes : (lRes && Array.isArray(lRes.items) ? lRes.items : []);
+              items.forEach(ch => addChannel(ch, cat.title || cat.name));
+              cursor = lRes && lRes.next;
+              if (!cursor || !items.length) break;
+            }
+          });
+        }
+        if (state.view === "livetv" && run === liveRefreshRun) renderView();
+      });
+      if (run !== liveRefreshRun) return;
+      state.liveLoading = false;
+      if (state.view === "livetv") renderView();
     }
 
     // =========================================================================
     // 5. RENDERIZADO DE PANTALLAS (INICIO, BUSCAR, TIENDA DE PLUGINS, EN VIVO)
     // =========================================================================
-    function renderCardGrid(items) {
+    async function playLiveChannel(ch) {
+      if (ch.url) { startPlayback(ch.url, ch.name); return; }
+      const inst = ch.pluginId && state.installed.find(x => x.id === ch.pluginId);
+      if (!inst || !ch.ref) { setStatus("Este canal no tiene dirección de video"); return; }
+      setStatus(`Resolviendo canal ${ch.name}...`);
+      try {
+        const r = await withTimeout(callPluginFn(inst, "resolve", ch.ref), 30000, inst.name);
+        const streamUrl = r && (r.url || (Array.isArray(r.copies) && r.copies[0] && r.copies[0].url));
+        if (streamUrl) startPlayback(streamUrl, ch.name, { mime: r.mime });
+        else setStatus("No se pudo obtener el video del canal");
+      } catch (e) {
+        setStatus(`✗ ${ch.name}: ${(e && (e.userMessage || e.message)) || "no disponible"}`, { priority: true });
+      }
+    }
+
+    function renderCardGrid(items, horizontal) {
       const grid = document.createElement("div");
-      grid.className = "cards-grid";
+      grid.className = horizontal ? "cards-row" : "cards-grid";
       items.forEach(item => {
         const card = document.createElement("div");
         card.className = "card focusable";
@@ -2048,7 +2183,8 @@
         const pos = filterInput.selectionStart;
         renderView();
         const newInput = document.getElementById("storeFilterInput");
-        if (newInput) { newInput.focus(); newInput.setSelectionRange(pos, pos); }
+        // El campo nuevo sigue en modo escritura (si no, se bloquearía a la 1.ª letra)
+        if (newInput) { unlockField(newInput); newInput.focus(); try { newInput.setSelectionRange(pos, pos); } catch (_) {} }
       });
     }
 
@@ -2106,7 +2242,7 @@
           <button class="action-btn small focusable" id="goStoreBtn">🧩 Ir a Tienda de Plugins (${state.storeEntries.length})</button>
         `;
         viewContent.appendChild(topActions);
-        document.getElementById("reloadHomeBtn").addEventListener("click", refreshHomeCatalog);
+        document.getElementById("reloadHomeBtn").addEventListener("click", () => refreshHomeCatalog());
         document.getElementById("goStoreBtn").addEventListener("click", () => { state.view = "plugins"; renderView(); });
 
         if (!state.homeRows.length) {
@@ -2123,7 +2259,7 @@
                 <div class="row-title">${section.row} <span class="row-source-tag">${section.sourceName || "Plugin"}</span></div>
               </div>
             `;
-            rowDiv.appendChild(renderCardGrid(section.items));
+            rowDiv.appendChild(renderCardGrid(section.items, true));
             viewContent.appendChild(rowDiv);
           });
         }
@@ -2272,81 +2408,107 @@
       } else if (state.view === "livetv") {
         viewTitle.textContent = `Canales en Vivo (${state.liveChannels.length} canales)`;
         const container = document.createElement("div");
-        container.innerHTML = `
-          <div class="input-row">
+        // Grupos (Deportes, Noticias...) como pestañas: con 150+ canales no hay
+        // que bajar uno por uno.
+        const groups = [];
+        state.liveChannels.forEach(ch => { const g = ch.group || "En Vivo"; if (!groups.includes(g)) groups.push(g); });
+        if (state.liveGroup !== "all" && !groups.includes(state.liveGroup)) state.liveGroup = "all";
+        const groupBar = document.createElement("div");
+        groupBar.className = "cat-bar";
+        [{ id: "all", label: `Todos (${state.liveChannels.length})` }].concat(groups.map(g => ({
+          id: g, label: `${g} (${state.liveChannels.filter(c => (c.group || "En Vivo") === g).length})`
+        }))).forEach(g => {
+          const b = document.createElement("button");
+          b.className = "pill-btn focusable" + (state.liveGroup === g.id ? " active" : "");
+          b.textContent = g.label;
+          b.addEventListener("click", () => { state.liveGroup = g.id; renderView(); });
+          groupBar.appendChild(b);
+        });
+        container.appendChild(groupBar);
+        if (state.liveLoading) {
+          const note = document.createElement("div");
+          note.style.cssText = "color:var(--muted); font-size:13px; margin:0 0 12px;";
+          note.textContent = "⏳ Cargando canales de tus plugins...";
+          container.appendChild(note);
+        }
+
+        const listDiv = document.createElement("div");
+        const shown = state.liveChannels.filter(ch => state.liveGroup === "all" || (ch.group || "En Vivo") === state.liveGroup);
+        if (!shown.length) {
+          listDiv.innerHTML = "<p style='color:var(--muted)'>Sin canales todavía. Agrega una lista M3U abajo o instala un plugin de TV (p. ej. TV Latam).</p>";
+        }
+        shown.slice(0, 400).forEach(ch => {
+          // La fila completa es enfocable: OK = reproducir. Antes solo los
+          // botones pequeños, y el foco caía primero en los campos de texto.
+          const row = document.createElement("div");
+          row.className = "list-box live-item focusable";
+          row.tabIndex = 0;
+          row.innerHTML = `
+            <div style="min-width:0;">
+              <strong>📺 ${ch.name}</strong> <span class="tag-chip">${ch.group || "En Vivo"}</span>
+              <div style="font-size:12px; color:var(--muted); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${ch.pluginId ? "Plugin: " + ch.pluginId : (ch.url || "")}</div>
+            </div>
+            ${ch.pluginId ? "" : `<div class="btn-group"><button class="action-btn secondary small focusable" data-del="1">🗑 Quitar</button></div>`}
+          `;
+          row.addEventListener("click", () => playLiveChannel(ch));
+          const del = row.querySelector("[data-del]");
+          if (del) del.addEventListener("click", ev => {
+            ev.stopPropagation();
+            const i = state.liveChannels.indexOf(ch);
+            if (i >= 0) state.liveChannels.splice(i, 1);
+            saveStore("kino_m3u_v2", state.liveChannels.filter(c => !c.pluginId)); // los de plugins se recargan solos
+            renderView();
+          });
+          listDiv.appendChild(row);
+        });
+        container.appendChild(listDiv);
+
+        // Agregar canales: al final, para que el foco no caiga en un campo de texto
+        const form = document.createElement("div");
+        form.className = "list-box";
+        form.style.cssText = "flex-direction:column; align-items:stretch; margin-top:18px;";
+        form.innerHTML = `
+          <strong>➕ Agregar canal o lista M3U</strong>
+          <div class="input-row" style="margin:8px 0 0;">
             <input id="m3uName" class="tv-input focusable" placeholder="Nombre del canal o lista M3U" />
             <input id="m3uUrl" class="tv-input focusable" placeholder="URL .m3u8 / .mp4 o lista .m3u completa" />
-            <button id="addM3uBtn" class="action-btn focusable">+ Agregar Canal / Lista M3U</button>
+            <button id="addM3uBtn" class="action-btn focusable">+ Agregar</button>
           </div>
-          <div id="channelsList"></div>
         `;
+        container.appendChild(form);
         viewContent.appendChild(container);
-        const listDiv = document.getElementById("channelsList");
-        const renderChannels = () => {
-          listDiv.innerHTML = "";
-          state.liveChannels.forEach((ch, idx) => {
-            const row = document.createElement("div");
-            row.className = "list-box";
-            row.innerHTML = `
-              <div>
-                <strong>📺 ${ch.name}</strong> <span class="tag-chip">${ch.group || "En Vivo"}</span>
-                <div style="font-size:12px; color:var(--muted); margin-top:3px;">${ch.url || ("Plugin: " + (ch.pluginId || "Kino"))}</div>
-              </div>
-              <div class="btn-group">
-                <button class="action-btn small focusable" data-play="${idx}">▶ Reproducir</button>
-                <button class="action-btn secondary small focusable" data-del="${idx}">🗑</button>
-              </div>
-            `;
-            row.querySelector("[data-play]").addEventListener("click", async () => {
-              if (ch.url) {
-                startPlayback(ch.url, ch.name);
-              } else if (ch.pluginId && ch.ref) {
-                const inst = state.installed.find(x => x.id === ch.pluginId);
-                if (inst) {
-                  setStatus(`Resolviendo canal ${ch.name}...`);
-                  const r = await withTimeout(callPluginFn(inst, "resolve", ch.ref), 45000, inst.name);
-                  const streamUrl = r && (r.url || (Array.isArray(r.copies) && r.copies[0] && r.copies[0].url));
-                  if (streamUrl) startPlayback(streamUrl, ch.name);
-                  else setStatus("No se pudo obtener stream del canal");
-                }
-              }
-            });
-            row.querySelector("[data-del]").addEventListener("click", () => {
-              state.liveChannels.splice(idx, 1);
-              saveStore("kino_m3u_v2", state.liveChannels.filter(ch => !ch.pluginId)); // los de plugins se recargan solos
-              renderChannels();
-            });
-            listDiv.appendChild(row);
-          });
-        };
-        renderChannels();
         document.getElementById("addM3uBtn").addEventListener("click", async () => {
           const name = document.getElementById("m3uName").value.trim() || "Canal M3U";
           const url = document.getElementById("m3uUrl").value.trim();
-          if (!url) return;
-          if (url.endsWith(".m3u") || url.includes("m3u")) {
+          if (!url) { setStatus("Escribe la URL del canal o de la lista M3U", { priority: true }); return; }
+          if (/\.m3u(\?|$)/i.test(url) || /m3u(?!8)/i.test(url)) {
             try {
               setStatus("Importando lista M3U...");
               const r = await smartFetch(url);
-              const lines = r.text.split(/\r?\n/);
+              const lines = String(r.text || "").split(/\r?\n/);
               let currentName = "Canal M3U";
+              let added = 0;
               lines.forEach(line => {
                 if (line.startsWith("#EXTINF:")) {
                   const parts = line.split(",");
                   currentName = parts[parts.length - 1].trim() || "Canal M3U";
-                } else if (line.startsWith("http")) {
+                } else if (/^https?:/i.test(line.trim())) {
                   state.liveChannels.push({ name: currentName, url: line.trim(), group: name });
+                  added++;
                 }
               });
-              saveStore("kino_m3u_v2", state.liveChannels.filter(ch => !ch.pluginId)); // los de plugins se recargan solos
-              renderChannels();
-              setStatus("Lista M3U importada");
-              return;
+              if (added) {
+                saveStore("kino_m3u_v2", state.liveChannels.filter(ch => !ch.pluginId));
+                setStatus(`Lista M3U importada: ${added} canales`, { priority: true });
+                renderView();
+                return;
+              }
             } catch (_) {}
           }
           state.liveChannels.push({ name, url, group: "Personalizado" });
-          saveStore("kino_m3u_v2", state.liveChannels.filter(ch => !ch.pluginId)); // los de plugins se recargan solos
-          renderChannels();
+          saveStore("kino_m3u_v2", state.liveChannels.filter(ch => !ch.pluginId));
+          setStatus(`Canal agregado: ${name}`, { priority: true });
+          renderView();
         });
       } else if (state.view === "favorites") {
         viewTitle.textContent = "Mi Biblioteca (Favoritos)";
@@ -2573,13 +2735,20 @@
     // =========================================================================
     // 6. FICHA DE DETALLE, EPISODIOS, RESOLUCIÓN DE STREAMS Y REPRODUCTOR
     // =========================================================================
-    function renderStreamOptions(streams, title) {
-      const streamsList = document.getElementById("streamsList");
+    // Lista de enlaces directos (va encima de los servidores web embed)
+    function renderStreamOptions(streams, title, opts = {}) {
+      const streamsList = document.getElementById("directStreamsList");
       streamsList.innerHTML = "";
       if (!streams.length) {
-        streamsList.innerHTML = "<div style='color:var(--muted); font-size:14px;'>No se devolvieron enlaces directos para esta opción. Prueba con '🔎 Buscar Streams en Plugins'.</div>";
+        streamsList.innerHTML = opts.pending
+          ? "<div style='color:var(--muted); font-size:14px;'>⏳ Buscando enlaces directos en tus plugins...</div>"
+          : "<div style='color:var(--muted); font-size:14px;'>No se devolvieron enlaces directos para esta opción. Prueba con '🔎 Buscar Streams en Plugins'.</div>";
         return;
       }
+      const head = document.createElement("h3");
+      head.style.cssText = "font-size:16px; margin-bottom:4px;";
+      head.textContent = `⚡ Enlaces directos — control total con el mando${opts.pending ? " (buscando más...)" : ""}`;
+      streamsList.appendChild(head);
       streams.forEach((s, i) => {
         const row = document.createElement("div");
         row.className = "stream-item focusable";
@@ -2660,7 +2829,7 @@
         return list;
       } catch (e) {
         setStatus(`Error al resolver en ${inst.name}: ${e.userMessage || e.message || e}`);
-        const streamsList = document.getElementById("streamsList");
+        const streamsList = document.getElementById("directStreamsList");
         if (streamsList && document.getElementById("detailOverlay").classList.contains("open")) {
           const hint = e.code === "unavailable"
             ? "<br><br>El sitio está protegido (Cloudflare) o los proxies no responden: revisa Ajustes ▸ 📡 Probar Conexión."
@@ -2680,6 +2849,10 @@
       document.getElementById("detailDesc").textContent = item.synopsis || "Cargando detalles...";
       document.getElementById("episodesSection").innerHTML = "";
       document.getElementById("streamsList").innerHTML = "";
+      document.getElementById("directStreamsList").innerHTML = "";
+      state.directStreams = [];
+      directRun++; // cancela la búsqueda de la ficha anterior
+      state.directSearch = null;
       document.getElementById("detailOverlay").classList.add("open");
       document.getElementById("playDirectBtn").focus();
 
@@ -2697,6 +2870,11 @@
       }
       if (state.activeSources.length) renderEmbedSources(item);
       if (item.kind === "series" && imdb && !item.stremioBase) loadCinemetaEpisodes(item, imdb);
+      // Películas de catálogo (Cinemeta / addons) sin video propio: buscar ya,
+      // en segundo plano, un enlace directo en los plugins.
+      if (!item.video && !(item.pluginId && item.ref && !item.stremioBase) && item.kind !== "series" && item.kind !== "live") {
+        findDirectStreams(item);
+      }
 
       const inst = state.installed.find(x => x.id === item.pluginId);
       // 1. Si viene de un plugin de GitHub, pedir details(ref) y episodes(ref)
@@ -2767,60 +2945,85 @@
       }
     }
 
-    // Busca streams para el título actual en todos los plugins de video instalados (útil cuando el catálogo viene de Cinemeta/TMDB)
-    async function searchStreamsAcrossPlugins(title, season, episode) {
-      setStatus(`Buscando servidores para "${title}" en tus plugins...`);
-      const foundStreams = [];
+    // Busca enlaces DIRECTOS (mp4/m3u8) del título en todos los plugins a la vez.
+    // Con un enlace directo el video va en el reproductor propio de la app y se
+    // controla con el mando (pausa, ⏩, ⏪); los servidores embed no.
+    let directRun = 0;
+    function findDirectStreams(item, opts = {}) {
+      const run = ++directRun;
+      const title = item.title;
+      state.directStreams = [];
       const failures = [];
-      for (const inst of state.installed) {
-        if (!inst.address || inst.enabled === false) continue;
+      const plugins = state.installed.filter(i => i.address && i.enabled !== false);
+      const box = document.getElementById("directStreamsList");
+      const stillHere = () => run === directRun && state.selectedItem === item;
+      if (!plugins.length) {
+        if (box) box.innerHTML = "";
+        return Promise.resolve([]);
+      }
+      if (box) box.innerHTML = "<div style='color:var(--muted); font-size:14px;'>⏳ Buscando enlaces directos en tus plugins...</div>";
+      setStatus(`Buscando enlaces directos para "${title}"...`);
+      let autoplayed = false;
+      const publish = () => {
+        if (!stillHere()) return;
+        renderStreamOptions(state.directStreams, title, { pending: true });
+        if (opts.autoplay && !autoplayed && !playerUI.isOpen()) {
+          const first = state.directStreams.find(x => x.url);
+          if (first) { autoplayed = true; startPlayback(first.url, `${title} (${first.label})`, { mime: first.mime }); }
+        }
+      };
+      const kindType = opts.season ? "series" : (item.kind === "series" ? "series" : "movie");
+      const promise = runPool(plugins, 3, async inst => {
+        if (!stillHere()) return;
         try {
           let sRes = null;
           try {
-            sRes = await withTimeout(callPluginFn(inst, "search", { q: title, query: title, type: season ? "series" : "movie", originalTitle: title, altTitles: [] }), 30000, inst.name);
+            sRes = await withTimeout(callPluginFn(inst, "search", { q: title, query: title, type: kindType, originalTitle: title, altTitles: [] }), 20000, inst.name);
           } catch (_) {
-            try { sRes = await withTimeout(callPluginFn(inst, "search", title), 20000, inst.name); } catch (_) {}
+            sRes = await withTimeout(callPluginFn(inst, "search", title), 15000, inst.name);
           }
-          const items = Array.isArray(sRes) ? sRes : (sRes && Array.isArray(sRes.items) ? sRes.items : []);
-          if (!items.length) { failures.push(`${inst.name}: sin coincidencias`); continue; }
-          // Prueba hasta 3 coincidencias: la primera no siempre es el título correcto
-          let resolvedAny = false;
+          let items = Array.isArray(sRes) ? sRes : (sRes && Array.isArray(sRes.items) ? sRes.items : []);
+          if (!items.length) { failures.push(`${inst.name}: sin coincidencias`); return; }
+          items = kinoRank.sortBySimilarity(items, title, it => it && (it.title || it.name));
           let lastErr = null;
-          for (const match of items.slice(0, 3)) {
+          for (const match of items.slice(0, 2)) {
+            if (!stillHere()) return;
             const targetRef = match.ref || match.id;
             if (!targetRef) continue;
             try {
-              const resolved = await withTimeout(callPluginFn(inst, "resolve", targetRef), 65000, inst.name);
-              if (resolved && resolved.url) {
-                foundStreams.push({ url: resolved.url, label: `${inst.name} · ${resolved.label || match.title || 'Principal'}`, mime: resolved.mime, headers: resolved.headers });
-                resolvedAny = true;
-              }
-              if (resolved && Array.isArray(resolved.copies)) {
-                resolved.copies.forEach(c => {
-                  if (c && c.url) { foundStreams.push({ url: c.url, label: `${inst.name} · ${c.label || 'Opción'}`, mime: c.mime, headers: c.headers }); resolvedAny = true; }
-                });
-              }
-              if (resolved && Array.isArray(resolved.alternatives)) {
-                resolved.alternatives.forEach(a => {
-                  if (a && a.ref) { foundStreams.push({ lazyRef: a.ref, lazyPluginId: inst.id, label: `${inst.name} · ${a.label || 'Servidor alterno'}` }); resolvedAny = true; }
-                });
-              }
-              if (resolvedAny) break;
-            } catch (e) {
-              lastErr = e;
-            }
+              const resolved = await withTimeout(callPluginFn(inst, "resolve", targetRef), 40000, inst.name);
+              const before = state.directStreams.length;
+              if (resolved && resolved.url) state.directStreams.push({ url: resolved.url, label: `${inst.name} · ${resolved.label || match.title || "Principal"}`, mime: resolved.mime, headers: resolved.headers });
+              if (resolved && Array.isArray(resolved.copies)) resolved.copies.forEach(c => { if (c && c.url) state.directStreams.push({ url: c.url, label: `${inst.name} · ${c.label || "Opción"}`, mime: c.mime, headers: c.headers }); });
+              if (resolved && Array.isArray(resolved.alternatives)) resolved.alternatives.forEach(a => { if (a && a.ref) state.directStreams.push({ lazyRef: a.ref, lazyPluginId: inst.id, label: `${inst.name} · ${a.label || "Servidor alterno"}` }); });
+              if (state.directStreams.length > before) { publish(); return; }
+            } catch (e) { lastErr = e; }
           }
-          if (!resolvedAny) failures.push(`${inst.name}: ${(lastErr && (lastErr.userMessage || lastErr.message)) || "sin enlaces"}`);
+          failures.push(`${inst.name}: ${(lastErr && (lastErr.userMessage || lastErr.message)) || "sin enlaces"}`);
         } catch (e) {
           failures.push(`${inst.name}: ${(e && (e.userMessage || e.message)) || "error"}`);
         }
-      }
-      renderStreamOptions(foundStreams, title);
-      if (!foundStreams.length && failures.length) {
-        const streamsList = document.getElementById("streamsList");
-        streamsList.innerHTML = `<div style='color:var(--muted); font-size:14px; line-height:1.8;'>Ningún plugin abrió enlaces:<br>${failures.map(f => `• ${f}`).join("<br>")}<br><br>Si todo dice "no está disponible", revisa Ajustes ▸ 📡 Probar Conexión.</div>`;
-      }
-      setStatus(foundStreams.length ? `Se encontraron ${foundStreams.length} enlaces` : "Ningún plugin abrió enlaces para este título");
+      }).then(() => {
+        if (!stillHere()) return state.directStreams;
+        renderStreamOptions(state.directStreams, title, { pending: false });
+        if (!state.directStreams.length && box) {
+          box.innerHTML = `<div style='color:var(--muted); font-size:14px; line-height:1.8;'>⚡ Ningún plugin dio enlace directo${failures.length ? ":<br>" + failures.map(f => `• ${f}`).join("<br>") : "."}</div>`;
+        }
+        setStatus(state.directStreams.length ? `${state.directStreams.length} enlaces directos encontrados` : "Sin enlaces directos: usa los servidores web de abajo");
+        if (opts.autoplay && !autoplayed && !state.directStreams.length && state.activeSources.length && !playerUI.isOpen()) {
+          state.currentSourceIndex = 0;
+          startPlaybackSource(state.activeSources[0], title);
+        }
+        return state.directStreams;
+      });
+      state.directSearch = { run, item, promise };
+      return promise;
+    }
+
+    // Compatibilidad: botón "Buscar Streams en Plugins" y episodios de addons
+    function searchStreamsAcrossPlugins(title, season, episode) {
+      const item = state.selectedItem && state.selectedItem.title === title ? state.selectedItem : { title };
+      return findDirectStreams(item, { season, episode });
     }
 
     // URL de reproducción a través del proxy CORS (para CDNs que no envían
@@ -2839,10 +3042,16 @@
 
     // Servidor web embed: va en <iframe>, que no necesita CORS. La página del
     // servidor trae su propio reproductor (y su publicidad).
+    // Pide a los servidores embed que arranquen solos (sin pulsar su ▶)
+    function withAutoplay(url) {
+      if (/[?&]autoplay=/i.test(url)) return url;
+      return url + (url.includes("?") ? "&" : "?") + "autoplay=1&autoPlay=true";
+    }
+
     function startEmbedPlayback(src, title) {
       state.activeVideoUrl = src.url;
       document.getElementById("nowPlayingTitle").textContent = `${title || "Reproduciendo"} — ${src.name}`;
-      document.getElementById("nowPlayingSub").textContent = "Servidor web con su propia publicidad. 🖱 Controlar video para usar sus botones · Si no carga: 🔄 Siguiente · Back: Salir";
+      document.getElementById("nowPlayingSub").textContent = "Servidor web: su botón ▶ solo se pulsa con puntero. Si no arranca solo: ⚡ Buscar directo o 🌐 Navegador TV · Back: Salir";
       playerUI.setMode("embed");
       document.getElementById("playerOverlay").classList.add("open");
       const video = document.getElementById("videoPlayer");
@@ -2854,7 +3063,7 @@
       video.style.display = "none";
       iframe.style.display = "block";
       playerUI.embedActive = true;
-      iframe.src = src.url;
+      iframe.src = withAutoplay(src.url);
       playerUI.show(true);
     }
 
@@ -2930,7 +3139,7 @@
         this.updatePlayLabel();
         this.updateProgress();
       },
-      defaultButton() { return this.el(this.isEmbed() ? "playerFocusFrameBtn" : "playerPlayPauseBtn"); },
+      defaultButton() { return this.el(this.isEmbed() ? "playerNextServerBtn" : "playerPlayPauseBtn"); },
       show(focusDefault) {
         this.overlay().classList.remove("hud-hidden");
         const hud = this.el("playerHud");
@@ -2962,7 +3171,7 @@
         this.osdTimer = setTimeout(() => o.classList.remove("show"), 1400);
       },
       togglePlay(forcePlay) {
-        if (this.isEmbed()) { this.osd("Usa 🖱 Controlar video para este servidor"); return; }
+        if (this.isEmbed()) { this.osd("Servidor web: usa ⚡ Buscar directo para controlar el video"); return; }
         const v = this.video();
         if (forcePlay === true || (forcePlay !== false && v.paused)) {
           v.play().catch(() => {});
@@ -3005,25 +3214,30 @@
       playerUI.el("playerPlayPauseBtn").addEventListener("click", () => { playerUI.togglePlay(); playerUI.scheduleHide(); });
       playerUI.el("playerRewBtn").addEventListener("click", () => { playerUI.seek(-10); playerUI.scheduleHide(); });
       playerUI.el("playerFwdBtn").addEventListener("click", () => { playerUI.seek(10); playerUI.scheduleHide(); });
-      // Servidores embed: el video está dentro de una página ajena (iframe) y
-      // solo recibe las teclas si tiene el foco. Back dentro del iframe vuelve
-      // su historial a about:blank, y eso se detecta para cerrar el reproductor.
-      playerUI.el("playerFocusFrameBtn").addEventListener("click", () => {
+      // Servidores embed: la página del servidor (iframe) NUNCA debe quedarse
+      // con el foco. Si lo toma (p. ej. con autofocus), el control remoto deja
+      // de llegar a la app: las flechas solo desplazaban esa página y Back no
+      // servía para salir. Se recupera el foco en cuanto se pierde.
+      const reclaimFocus = () => {
+        if (!playerUI.isOpen()) return;
         const f = playerUI.el("webPlayerFrame");
-        playerUI.overlay().classList.add("hud-hidden");
-        clearTimeout(playerUI.hideTimer);
-        try { f.focus(); f.contentWindow && f.contentWindow.focus(); } catch (_) {}
+        if (document.activeElement === f) {
+          try { window.focus(); } catch (_) {}
+          playerUI.show(true);
+        }
+      };
+      window.addEventListener("blur", () => setTimeout(reclaimFocus, 0));
+      setInterval(reclaimFocus, 1000);
+      playerUI.el("playerBrowserBtn").addEventListener("click", () => {
+        if (!state.activeVideoUrl) return;
+        window.open(state.activeVideoUrl, "_blank");
+        setStatus("Abierto en el navegador del TV (allí sí hay puntero para pulsar ▶)", { priority: true });
       });
-      playerUI.el("webPlayerFrame").addEventListener("load", () => {
-        if (!playerUI.embedActive || !playerUI.isOpen()) return;
-        let blank = false;
-        try { blank = playerUI.el("webPlayerFrame").contentWindow.location.href === "about:blank"; } catch (_) { /* página ajena: sigue reproduciendo */ }
-        if (blank) document.getElementById("closePlayerBtn").click();
-      });
-      // Si el foco se va al iframe (p. ej. con un puntero), ocultar la barra
-      window.addEventListener("blur", () => {
-        if (playerUI.isOpen() && playerUI.isEmbed() && document.activeElement === playerUI.el("webPlayerFrame")) {
-          playerUI.overlay().classList.add("hud-hidden");
+      playerUI.el("playerDirectBtn").addEventListener("click", () => {
+        document.getElementById("closePlayerBtn").click();
+        if (state.selectedItem) {
+          const it = state.selectedItem;
+          findDirectStreams(it, { season: state.selectedSeason, episode: state.selectedEpisode, autoplay: true });
         }
       });
       playerUI.overlay().addEventListener("mousemove", () => { if (playerUI.isOpen()) playerUI.show(false); });
@@ -3082,22 +3296,36 @@
     document.getElementById("playDirectBtn").addEventListener("click", async () => {
       const it = state.selectedItem;
       if (!it) return;
-      // Si la ficha ya armó servidores (embed por IMDb o MP4 directo), reproducir el primero
+      const playDirect = () => {
+        const d = (state.directStreams || []).find(x => x.url);
+        if (d) { startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime }); return true; }
+        return false;
+      };
+      // 1. Enlace directo (se controla con el mando) o el video propio del título
+      if (playDirect()) return;
+      if (it.video) { startPlayback(it.video, it.title); return; }
+      // 2. Título de un plugin: resolver su enlace
+      if (it.pluginId && it.ref && !it.stremioBase) {
+        const list = await resolvePluginRef(it.pluginId, it.ref, it.title);
+        const first = list.find(x => x.url);
+        if (first) startPlayback(first.url, `${it.title} (${first.label})`, { mime: first.mime });
+        return;
+      }
+      // 3. Si la búsqueda de enlaces directos sigue en curso, esperarla un poco
+      const ds = state.directSearch;
+      if (ds && ds.item === it) {
+        setStatus("Buscando un enlace directo (máx. 12 s)...");
+        await Promise.race([ds.promise, new Promise(r => setTimeout(r, 12000))]);
+        if (state.selectedItem !== it || playerUI.isOpen()) return;
+        if (playDirect()) return;
+      }
+      // 4. Servidores web embed
       if (state.activeSources.length) {
         state.currentSourceIndex = 0;
         startPlaybackSource(state.activeSources[0], it.title);
         return;
       }
-      if (it.video) {
-        startPlayback(it.video, it.title);
-        return;
-      }
-      if (it.pluginId && it.ref && !it.stremioBase) {
-        const list = await resolvePluginRef(it.pluginId, it.ref, it.title);
-        if (list.length === 1) startPlayback(list[0].url, it.title);
-        return;
-      }
-      await searchStreamsAcrossPlugins(it.title);
+      findDirectStreams(it, { autoplay: true, season: state.selectedSeason, episode: state.selectedEpisode });
     });
 
     document.getElementById("searchAllPluginsBtn").addEventListener("click", () => {
@@ -3126,9 +3354,15 @@
 
     document.getElementById("closeDetailBtn").addEventListener("click", () => {
       document.getElementById("detailOverlay").classList.remove("open");
-      const card = state.lastFocusedCard;
-      if (card && document.body.contains(card)) card.focus();
-      else document.getElementById("navHome").focus();
+      let card = state.lastFocusedCard;
+      // Si el Inicio se redibujó mientras la ficha estaba abierta, buscar la
+      // misma tarjeta en la vista nueva
+      if (card && !document.body.contains(card)) {
+        const sig = focusSignature(card);
+        card = visibleFocusables(document.getElementById("viewContent")).find(el => focusSignature(el) === sig) || null;
+      }
+      if (card) focusAndReveal(card);
+      else (document.querySelector("#viewContent .focusable") || document.getElementById("navHome")).focus();
     });
 
     document.getElementById("saveConfigBtn").addEventListener("click", async () => {
@@ -3174,6 +3408,15 @@
 
     // Cicla por los servidores de la ficha (embed o directos) sin salir del player
     document.getElementById("playerNextServerBtn").addEventListener("click", () => {
+      // Reproduciendo un enlace directo: pasar al siguiente enlace directo
+      const directs = (state.directStreams || []).filter(x => x.url);
+      if (!playerUI.isEmbed() && directs.length > 1) {
+        const cur = directs.findIndex(x => x.url === state.activeVideoUrl);
+        const nxt = directs[(cur + 1) % directs.length];
+        playerUI.osd(`🔄 ${nxt.label}`);
+        startPlayback(nxt.url, `${state.selectedItem ? state.selectedItem.title : "Kino TV"} (${nxt.label})`, { mime: nxt.mime });
+        return;
+      }
       if (!state.activeSources.length) { setStatus("No hay más servidores en la lista"); return; }
       state.currentSourceIndex = (state.currentSourceIndex + 1) % state.activeSources.length;
       const src = state.activeSources[state.currentSourceIndex];
@@ -3194,10 +3437,63 @@
     });
 
     // Navegación espacial con el control remoto de VIDAA OS (Flechas + OK + Back + Amarillo)
+    // ---------------------------------------------------------------------
+    // Campos de texto en el TV: con solo enfocarlos, VIDAA abre el teclado en
+    // pantalla y el control queda atrapado (así no se podía bajar a los canales
+    // en En Vivo). Ahora están bloqueados ("solo lectura") hasta pulsar OK:
+    // las flechas los atraviesan como a cualquier botón.
+    //   OK = escribir · OK otra vez o Back = terminar · ▲▼ = salir del campo
+    // ---------------------------------------------------------------------
+    function isTextField(el) {
+      return !!(el && el.matches && el.matches("input.tv-input, textarea.tv-input"));
+    }
+    function isEditingField(el) { return isTextField(el) && !!el.dataset.editing; }
+    function lockField(el) {
+      if (!isTextField(el)) return;
+      delete el.dataset.editing;
+      el.readOnly = true;
+    }
+    function unlockField(el) {
+      if (!isTextField(el)) return;
+      el.readOnly = false;
+      el.dataset.editing = "1";
+    }
+    document.querySelectorAll(".tv-input").forEach(lockField);
+    new MutationObserver(muts => {
+      muts.forEach(m => m.addedNodes.forEach(n => {
+        if (n.nodeType !== 1) return;
+        if (isTextField(n) && !n.dataset.editing) lockField(n);
+        n.querySelectorAll && n.querySelectorAll(".tv-input").forEach(el => { if (!el.dataset.editing) lockField(el); });
+      }));
+    }).observe(document.body, { childList: true, subtree: true });
+    document.addEventListener("focusout", e => { if (isEditingField(e.target)) lockField(e.target); });
+    // Fase de captura: corre antes que los manejadores propios de cada campo
+    window.addEventListener("keydown", e => {
+      const el = document.activeElement;
+      if (!isTextField(el)) return;
+      const isEnter = e.key === "Enter" || e.keyCode === 13;
+      const isBack = e.key === "Escape" || e.keyCode === 461 || e.key === "GoBack";
+      if (!isEditingField(el)) {
+        if (isEnter) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          el.blur();
+          unlockField(el);
+          el.focus();
+          try { const n = el.value.length; el.setSelectionRange(n, n); } catch (_) {}
+          setStatus("✏️ Escribe y pulsa OK para terminar", { priority: true });
+        }
+        return; // flechas y Back siguen al manejador general
+      }
+      if (isBack) { e.preventDefault(); e.stopImmediatePropagation(); lockField(el); return; }
+      if (isEnter) { setTimeout(() => lockField(el), 0); return; } // el campo procesa su Enter (buscar, instalar...)
+      if (e.key === "ArrowUp" || e.key === "ArrowDown") { lockField(el); return; } // y se navega
+      e.stopImmediatePropagation(); // letras, ◀ ▶, borrar: son del campo
+    }, true);
+
     window.addEventListener("keydown", e => {
       if (e.key === "Escape" || e.key === "Backspace" || e.keyCode === 461 || e.keyCode === 8) {
-        const activeTag = document.activeElement && document.activeElement.tagName;
-        if (activeTag === "INPUT" && e.key === "Backspace") return;
+        if (isEditingField(document.activeElement)) return;
         if (document.getElementById("playerOverlay").classList.contains("open")) {
           e.preventDefault();
           document.getElementById("closePlayerBtn").click();
@@ -3234,8 +3530,7 @@
       const dir = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" }[e.key];
       if (dir) {
         const activeTag = document.activeElement && document.activeElement.tagName;
-        if ((activeTag === "INPUT" || activeTag === "TEXTAREA") && (dir === "left" || dir === "right")) return;
-        if (activeTag === "SELECT" && (dir === "up" || dir === "down")) return;
+        if (isEditingField(document.activeElement) && (dir === "left" || dir === "right")) return;
         if (moveFocus(dir)) e.preventDefault();
       }
     });
@@ -3270,7 +3565,7 @@
       if (!el || !el.classList || !el.classList.contains("focusable")) return;
       lastFocusRect = el.getBoundingClientRect();
       if (el.closest(".sidebar")) zoneMemory.sidebar = el;
-      else if (el.closest("#mainView")) zoneMemory.main = el;
+      else if (el.closest("#mainView")) { zoneMemory.main = el; zoneMemory.mainView = state.view; }
     });
     function nearestTo(rect, list) {
       let best = null, bestD = Infinity;
@@ -3310,28 +3605,40 @@
         if (vertical) {
           orthGap = Math.max(0, r.left - r0.right, r0.left - r.right);
           // Desde algo ancho (campo de texto, fila) se baja al elemento de la izquierda
-          const refX = r0.width > r.width * 2.5 ? r0.left + r.width / 2 : cx0;
+          const refX = r0.width > r.width * 1.5 ? r0.left + r.width / 2 : cx0;
           orthCenter = Math.abs(cx - refX);
         } else {
           orthGap = Math.max(0, r.top - r0.bottom, r0.top - r.bottom);
           orthCenter = Math.abs(cy - cy0);
         }
+        // En horizontal solo se vale la misma fila (o casi): al final de una
+        // fila, ▶ ya no salta a un botón de otra fila.
+        if (!vertical && orthGap > 24) return;
         // Lo que está alineado (en la misma fila/columna) gana a lo que está en diagonal
         const score = Math.max(0, primary) + orthGap * 3 + orthCenter * 0.3;
         if (score < bestScore) { bestScore = score; best = c; }
       });
+      // ◀ desde el contenido sin nada a la izquierda en esa fila: al menú lateral
+      if (!best && scope === document && dir === "left" && !current.closest(".sidebar")) {
+        best = document.querySelector(".nav-btn.active") || document.querySelector(".sidebar .focusable");
+      }
       if (!best) return false;
       // Entre menú lateral y contenido: volver a donde se estaba
       if (scope === document) {
         const fromSidebar = !!current.closest(".sidebar");
         const toSidebar = !!best.closest(".sidebar");
-        if (fromSidebar && !toSidebar && dir === "right" && zoneMemory.main && all.includes(zoneMemory.main)) best = zoneMemory.main;
+        if (fromSidebar && !toSidebar && dir === "right") {
+          // Volver a donde se estaba en esta pantalla; si no, al primer elemento
+          if (zoneMemory.main && zoneMemory.mainView === state.view && all.includes(zoneMemory.main)) best = zoneMemory.main;
+          else best = visibleFocusables(document.getElementById("mainView"))[0] || best;
+        }
         else if (!fromSidebar && toSidebar && dir === "left") best = document.querySelector(".nav-btn.active") || best;
       }
       return focusAndReveal(best);
     }
 
     // Inicialización
+    state.homeRows = loadHomeCache();
     renderView();
     document.getElementById("navHome").focus();
     refreshHomeCatalog();
