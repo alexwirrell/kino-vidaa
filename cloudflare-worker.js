@@ -14,10 +14,21 @@
 //   5. En la app: ⚙️ Ajustes / Red → Proxy propio → pega la dirección → Guardar.
 //      (La app añade sola el "/?url=" del final.)
 //
+// Clave privada (recomendado): escribe una clave en ACCESS_KEY, aquí abajo,
+// SOLO en el editor de Cloudflare (no la subas a ningún repositorio). Así nadie
+// más puede usar tu worker aunque conozca la dirección. En la app escribe la
+// dirección con la clave: kino.TU-NOMBRE.workers.dev/?key=TU-CLAVE
+//
+// ¿Cuesta dinero? No en el plan gratis: si se pasan las 100.000 peticiones del
+// día, Cloudflare simplemente rechaza las siguientes hasta el día siguiente; no
+// cobra nada salvo que tú actives a mano un plan de pago.
+//
 // Uso: https://TU-WORKER.workers.dev/?url=<destino codificado>
 //      &ref=<Referer>   opcional: muchos servidores de video lo exigen
 //      &hdr=<JSON>      opcional: cabeceras extra {"User-Agent": "...", "Cookie": "..."}
 // =============================================================================
+
+const ACCESS_KEY = ""; // ← pon aquí tu clave (p. ej. "mi-clave-larga-123"); vacío = sin clave
 
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
@@ -40,6 +51,9 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(new Headers()) });
 
     const self = new URL(request.url);
+    if (ACCESS_KEY && self.searchParams.get("key") !== ACCESS_KEY) {
+      return new Response("clave incorrecta", { status: 403, headers: cors(new Headers()) });
+    }
     const target = self.searchParams.get("url");
     if (!target) {
       return new Response("Proxy de Kino VIDAA funcionando ✓  (uso: /?url=https://...)", {
@@ -62,14 +76,15 @@ export default {
       try { for (const [k, v] of Object.entries(JSON.parse(extra))) headers.set(k, String(v)); } catch (_) {}
     }
 
+    // El cuerpo se lee entero: si el destino redirige (p. ej. rd.php), se puede
+    // volver a enviar. Con el flujo original, la redirección fallaba (HTTP 502).
+    const hasBody = !["GET", "HEAD"].includes(request.method);
+    const body = hasBody ? await request.arrayBuffer() : undefined;
+    headers.delete("content-length");
+
     let upstream;
     try {
-      upstream = await fetch(dest.toString(), {
-        method: request.method,
-        headers,
-        body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
-        redirect: "follow",
-      });
+      upstream = await fetch(dest.toString(), { method: request.method, headers, body, redirect: "follow" });
     } catch (err) {
       return new Response("el destino no respondió: " + err, { status: 502, headers: cors(new Headers()) });
     }

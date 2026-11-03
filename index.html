@@ -544,9 +544,9 @@
       try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
     }
 
-    // Proxy propio por defecto (el Cloudflare Worker del dueño de este repositorio):
-    // así no hay que escribirlo con el control. Se puede cambiar en Ajustes.
-    const DEFAULT_CUSTOM_PROXY = "green-silence-cc19.alexwirrell.workers.dev";
+    // Sin proxy propio por defecto: la dirección del worker es privada de cada
+    // usuario y no va en el código público (se escribe en Ajustes / Red).
+    const DEFAULT_CUSTOM_PROXY = "";
 
     // Dirección del proxy propio: acepta "kino.x.workers.dev", con o sin https://
     // y con o sin "/?url=" (antes había que escribirla exacta o no funcionaba)
@@ -554,8 +554,10 @@
       let t = String(v || "").trim();
       if (!t) return "";
       if (!/^https?:\/\//i.test(t)) t = "https://" + t;
-      if (!/[?&=]$/.test(t) && !t.includes("?")) t = t.replace(/\/+$/, "") + "/?url=";
-      return t;
+      if (/[?&]url=$/.test(t) || /[?&=]$/.test(t)) return t;
+      // "worker.dev/?key=CLAVE" → "worker.dev/?key=CLAVE&url="
+      if (t.includes("?")) return t + "&url=";
+      return t.replace(/\/+$/, "") + "/?url=";
     }
 
     // Arma la URL por el proxy. Con el proxy propio (Cloudflare Worker) también
@@ -710,7 +712,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r10-2026-11-03";
+    const BUILD_TAG = "r11-2026-11-03";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -923,7 +925,13 @@
           const res = await fetchWithTimeout(target, { method, headers: safeHeaders, body }, Math.min(timeoutMs, 15000));
           const txt = await readBodyCapped(res);
           diagLog("red", `${method} ${shortUrl} → proxy ${proxyName} → HTTP ${res.status} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
-          return { ok: res.ok, status: res.status, url: url, text: txt, headers: {}, via: proxyPrefix };
+          // Con el proxy propio, la URL final tras redirecciones (la usan plugins como CineHD Plus)
+          let finalUrl = url;
+          try { finalUrl = res.headers.get("X-Final-Url") || url; } catch (_) {}
+          if (proxyPrefix === state.customProxy && res.status >= 500) {
+            diagLog("red", `   ↳ tu proxy respondió: ${String(txt || "").slice(0, 140)}`);
+          }
+          return { ok: res.ok, status: res.status, url: finalUrl, text: txt, headers: {}, via: proxyPrefix };
         } catch (e) {
           diagLog("red", `${method} ${shortUrl} → proxy ${proxyName} → sin respuesta (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
           throw e;
@@ -969,7 +977,8 @@
       let lastAny = null;
       // Si TODOS los proxies están marcados como caídos, se reintenta con todos igualmente:
       // la marca es una pista, no una condena (una sola URL que falle no debe vetar el proxy).
-      const isDead = p => Date.now() - (state.deadProxies[p] || 0) < 10 * 60 * 1000;
+      // El proxy propio solo se aparta 30 s tras un fallo (los públicos, 10 min)
+      const isDead = p => Date.now() - (state.deadProxies[p] || 0) < (p === state.customProxy ? 30 * 1000 : 10 * 60 * 1000);
       const anyAlive = proxies.some(p => !isDead(p));
       let usable = proxies.filter(p => !anyAlive || !isDead(p));
       if (!anyAlive) {
@@ -977,7 +986,7 @@
         // en cada petición (la app se volvía lentísima). Ahora solo se prueba
         // uno, el que falló hace más tiempo, por si ya volvió.
         usable = usable.slice().sort((a, b) => (state.deadProxies[a] || 0) - (state.deadProxies[b] || 0)).slice(0, 1);
-        if (!state.proxiesDown) {
+        if (!state.proxiesDown && !state.customProxy) {
           state.proxiesDown = true;
           diagLog("red", "⚠️ Ningún proxy responde desde esta red: configura tu proxy propio (Ajustes / Red)");
           setStatus("⚠️ Los proxies públicos no responden en tu red: configura tu proxy propio en ⚙️ Ajustes", { priority: true });
@@ -2598,7 +2607,8 @@
               Si los proxies públicos no responden (en 🩺 Diagnóstico sale "sin respuesta"), los plugins no pueden buscar
               ni la app puede sacar el video de los servidores web. Crea tu proxy en 5 minutos <b>desde el teléfono o el computador</b>:
               abre <b>github.com/alexwirrell/kino-vidaa</b> → archivo <b>cloudflare-worker.js</b> y sigue los pasos de arriba del archivo.
-              Luego escribe aquí la dirección de tu worker (basta con <code>kino.TU-NOMBRE.workers.dev</code>) y pulsa 💾 Guardar.
+              Luego escribe aquí la dirección de tu worker (basta con <code>kino.TU-NOMBRE.workers.dev</code>; si le pusiste clave:
+              <code>kino.TU-NOMBRE.workers.dev/?key=TU-CLAVE</code>) y pulsa 💾 Guardar. La dirección queda solo en este TV.
             </p>
             <div class="input-row" style="margin:0;">
               <input id="customProxyInput" class="tv-input focusable" value="${state.customProxy}" placeholder="Dirección de tu worker, ej. kino.tunombre.workers.dev" />
@@ -2720,10 +2730,21 @@
 //   5. En la app: ⚙️ Ajustes / Red → Proxy propio → pega la dirección → Guardar.
 //      (La app añade sola el "/?url=" del final.)
 //
+// Clave privada (recomendado): escribe una clave en ACCESS_KEY, aquí abajo,
+// SOLO en el editor de Cloudflare (no la subas a ningún repositorio). Así nadie
+// más puede usar tu worker aunque conozca la dirección. En la app escribe la
+// dirección con la clave: kino.TU-NOMBRE.workers.dev/?key=TU-CLAVE
+//
+// ¿Cuesta dinero? No en el plan gratis: si se pasan las 100.000 peticiones del
+// día, Cloudflare simplemente rechaza las siguientes hasta el día siguiente; no
+// cobra nada salvo que tú actives a mano un plan de pago.
+//
 // Uso: https://TU-WORKER.workers.dev/?url=&lt;destino codificado&gt;
 //      &amp;ref=&lt;Referer&gt;   opcional: muchos servidores de video lo exigen
 //      &amp;hdr=&lt;JSON&gt;      opcional: cabeceras extra {"User-Agent": "...", "Cookie": "..."}
 // =============================================================================
+
+const ACCESS_KEY = ""; // ← pon aquí tu clave (p. ej. "mi-clave-larga-123"); vacío = sin clave
 
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
@@ -2746,6 +2767,9 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(new Headers()) });
 
     const self = new URL(request.url);
+    if (ACCESS_KEY &amp;&amp; self.searchParams.get("key") !== ACCESS_KEY) {
+      return new Response("clave incorrecta", { status: 403, headers: cors(new Headers()) });
+    }
     const target = self.searchParams.get("url");
     if (!target) {
       return new Response("Proxy de Kino VIDAA funcionando ✓  (uso: /?url=https://...)", {
@@ -2768,14 +2792,15 @@ export default {
       try { for (const [k, v] of Object.entries(JSON.parse(extra))) headers.set(k, String(v)); } catch (_) {}
     }
 
+    // El cuerpo se lee entero: si el destino redirige (p. ej. rd.php), se puede
+    // volver a enviar. Con el flujo original, la redirección fallaba (HTTP 502).
+    const hasBody = !["GET", "HEAD"].includes(request.method);
+    const body = hasBody ? await request.arrayBuffer() : undefined;
+    headers.delete("content-length");
+
     let upstream;
     try {
-      upstream = await fetch(dest.toString(), {
-        method: request.method,
-        headers,
-        body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
-        redirect: "follow",
-      });
+      upstream = await fetch(dest.toString(), { method: request.method, headers, body, redirect: "follow" });
     } catch (err) {
       return new Response("el destino no respondió: " + err, { status: 502, headers: cors(new Headers()) });
     }
@@ -4445,10 +4470,13 @@ export default {
     } catch (_) {}
     // Comprobar que el proxy propio responde (aviso claro en Diagnóstico)
     if (state.customProxy) {
-      fetchWithTimeout(state.customProxy.replace(/\?url=$/, ""), {}, 8000)
+      fetchWithTimeout(state.customProxy.replace(/[?&]url=$/, ""), {}, 8000)
         .then(r => r.text().then(t => {
           const ok = /Kino VIDAA funcionando/.test(t);
-          diagLog("red", ok ? `✓ Proxy propio responde: ${state.customProxy}` : `⚠️ El proxy propio respondió algo inesperado (HTTP ${r.status}): ¿pegaste el código de cloudflare-worker.js y pulsaste Deploy?`);
+          const where = state.customProxy.replace(/^https?:\/\//, "").split(/[/?]/)[0]; // sin la clave
+          diagLog("red", ok ? `✓ Proxy propio responde (${where})`
+            : r.status === 403 ? `⚠️ Tu proxy pide clave y la que pusiste no coincide (${where})`
+            : `⚠️ El proxy propio respondió algo inesperado (HTTP ${r.status}): ¿pegaste el código de cloudflare-worker.js y pulsaste Deploy?`);
           if (!ok) setStatus("⚠️ Tu proxy propio no tiene el código de Kino: revisa el worker en Cloudflare", { priority: true });
         }))
         .catch(() => diagLog("red", `✗ El proxy propio no responde: ${state.customProxy}`));
