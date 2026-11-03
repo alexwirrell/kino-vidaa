@@ -742,7 +742,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r23-2026-11-05";
+    const BUILD_TAG = "r24-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -1015,7 +1015,9 @@
         try {
           // redirect "manual" solo lo puede cumplir el proxy propio (el navegador oculta el 3xx)
           const target = proxyFor(proxyPrefix, url, headers) + (manual && proxyPrefix === state.customProxy ? "&redir=manual" : "");
-          const res = await fetchWithTimeout(target, { method, headers: safeHeaders, body }, Math.min(timeoutMs, 15000));
+          // Con proxy propio, los públicos son el último recurso: poca espera
+          const pt = state.customProxy && proxyPrefix !== state.customProxy ? Math.min(timeoutMs, 4000) : Math.min(timeoutMs, 15000);
+          const res = await fetchWithTimeout(target, { method, headers: safeHeaders, body }, pt);
           const { text: txt, truncated, raw } = await readBodyInfo(res, cap);
           diagLog("red", `${method} ${shortUrl} → proxy ${proxyName} → HTTP ${res.status} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
           // Con el proxy propio, la URL final tras redirecciones (la usan plugins como CineHD Plus)
@@ -1076,7 +1078,8 @@
       // Si TODOS los proxies están marcados como caídos, se reintenta con todos igualmente:
       // la marca es una pista, no una condena (una sola URL que falle no debe vetar el proxy).
       // El proxy propio solo se aparta 30 s tras un fallo (los públicos, 10 min)
-      const isDead = p => Date.now() - (state.deadProxies[p] || 0) < (p === state.customProxy ? 30 * 1000 : 10 * 60 * 1000);
+      // El proxy propio solo se aparta 10 s, y solo si falló la conexión (no si un sitio fue lento)
+      const isDead = p => Date.now() - (state.deadProxies[p] || 0) < (p === state.customProxy ? 10 * 1000 : 10 * 60 * 1000);
       const anyAlive = proxies.some(p => !isDead(p));
       let usable = proxies.filter(p => !anyAlive || !isDead(p));
       if (!anyAlive) {
@@ -1092,6 +1095,7 @@
         }
       }
       const attempt = async p => {
+        const t0 = Date.now();
         try {
           const r = await tryProxy(p);
           if (!r || r.status <= 0) { state.deadProxies[p] = Date.now(); return null; }
@@ -1101,14 +1105,16 @@
           else if (!firstUsable) firstUsable = r;
           return null;
         } catch (_) {
-          state.deadProxies[p] = Date.now(); // sin respuesta o timeout: no insistir por un rato
+          // Un sitio lento (timeout) no es un proxy caído: antes, una espera de 7 s en
+          // cuevanaserie apartaba el proxy propio 30 s y todo caía en los públicos muertos
+          if (p !== state.customProxy || Date.now() - t0 < 2500) state.deadProxies[p] = Date.now();
           return null;
         }
       };
       const remember = p => {
         if (state.proxiesDown) { state.proxiesDown = false; if (state.view === "home") renderView(); }
         // Recuerda el proxy que sí funcionó para intentarlo primero la próxima vez
-        if (state.lastGoodProxy !== p) { state.lastGoodProxy = p; saveStore("kino_last_proxy", p); }
+        if (state.lastGoodProxy !== p && (!state.customProxy || p === state.customProxy)) { state.lastGoodProxy = p; saveStore("kino_last_proxy", p); }
       };
       // 1) El proxy propio y el último que funcionó, primero (suelen bastar)
       const preferred = usable.filter(p => p === state.customProxy || p === state.lastGoodProxy);
@@ -5716,7 +5722,7 @@ export default {
       markUserPlayIntent();
       state.autoHops = 0;
       const playDirect = () => {
-        const d = (state.directStreams || []).find(x => x.url);
+        const d = (state.directStreams || []).find(x => x.url && !x.failed);
         if (d) { startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime, referer: refOf(d), subtitles: d.subtitles }); return true; }
         return false;
       };
@@ -5751,7 +5757,15 @@ export default {
       const hadBackground = !!(state.directSearch && state.directSearch.item === it);
       if (state.installed.some(i => i.address && i.enabled !== false) && (state.captureSkipped || !hadBackground)) {
         setStatus("⏳ Buscando el video en tus plugins (máx. 40 s)...", { priority: true });
-        await Promise.race([findDirectStreams(it, { season: state.selectedSeason, episode: state.selectedEpisode }), new Promise(r => setTimeout(r, 40000))]);
+        // Arrancar con el PRIMER enlace que aparezca (antes se esperaba a todos los plugins)
+        const all = findDirectStreams(it, { season: state.selectedSeason, episode: state.selectedEpisode });
+        const tEnd = Date.now() + 40000;
+        while (Date.now() < tEnd) {
+          if ((state.directStreams || []).some(x => x.url && !x.failed)) break;
+          const finished = await Promise.race([all.then(() => true), new Promise(r => setTimeout(() => r(false), 300))]);
+          if (finished) break;
+          if (state.selectedItem !== it || playerUI.isOpen()) return;
+        }
         if (state.selectedItem !== it || playerUI.isOpen()) return;
         if (playDirect()) return;
       }
