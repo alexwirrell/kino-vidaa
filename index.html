@@ -814,7 +814,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r35-2026-11-05";
+    const BUILD_TAG = "r36-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -4570,6 +4570,9 @@ async function handle(request) {
         }
       };
       const kindType = opts.season ? "series" : (item.kind === "series" ? "series" : "movie");
+      // Año de la película (para descartar resultados de otro título): del ítem o, si no lo trae, de TMDB
+      const yearP = (kindType !== "movie" || item.year || !state.tmdbKey) ? Promise.resolve(item.year)
+        : withTimeout(kinoMeta({ type: "movie", title }), 5000, "año").then(m => (m && m.year) || "", () => "");
       const promise = runPool(plugins, 3, async inst => {
         if (!stillHere()) return;
         try {
@@ -4582,8 +4585,20 @@ async function handle(request) {
           let items = Array.isArray(sRes) ? sRes : (sRes && Array.isArray(sRes.items) ? sRes.items : []);
           if (!items.length) { failures.push(`${inst.name}: sin coincidencias`); return; }
           items = kinoRank.sortBySimilarity(items, title, it => it && (it.title || it.name));
+          // Películas: fuera los resultados de otro año (p. ej. «Spider-Man: Brand New Day» 2026 no es
+          // «Spider-Man: Sin camino a casa» 2021, aunque compartan palabras). Un año de margen.
+          const yearOf = x => Number(String((x && (x.year || x.releaseYear)) || "").slice(0, 4)) || 0;
+          const wantYear = kindType === "movie" ? yearOf({ year: await yearP }) : 0;
+          if (wantYear) {
+            const kept = items.filter(m => !yearOf(m) || Math.abs(yearOf(m) - wantYear) <= 1);
+            if (kept.length < items.length) diagLog("plugin", `   ↳ ${inst.name}: se descartan ${items.length - kept.length} resultados de otro año (se busca ${wantYear})`);
+            items = kept;
+            if (!items.length) { failures.push(`${inst.name}: sin coincidencias de ${wantYear}`); return; }
+          }
+          // El 2.º candidato solo si su año confirma que es el mismo título
+          const tries = items.slice(0, 1).concat(userIsPlaying() && wantYear && yearOf(items[1]) ? items.slice(1, 2) : []);
           let lastErr = null;
-          for (const match of items.slice(0, userIsPlaying() ? 2 : 1)) {
+          for (const match of tries) {
             if (!stillHere()) return;
             const targetRef = match.ref || match.id;
             if (!targetRef) continue;
