@@ -713,7 +713,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r14-2026-11-04";
+    const BUILD_TAG = "r16-2026-11-04";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -875,9 +875,49 @@
       }
     }
 
+    // Lee el cuerpo con tope y dice si se cortó (kino.fetch `maxBytes`/`truncated`)
+    async function readBodyInfo(res, capBytes) {
+      const cap = capBytes || 4 * 1024 * 1024;
+      // Bytes crudos: base64() de kino.fetch debe devolver el binario tal cual
+      // (antes se pasaba por texto UTF-8 y se corrompía, p. ej. en FrameXTV)
+      let raw = null, truncated = false;
+      try {
+        if (res.body && typeof res.body.getReader === "function") {
+          const reader = res.body.getReader();
+          const chunks = [];
+          let total = 0;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const room = cap - total;
+            if (value.length >= room) { chunks.push(value.subarray(0, room)); total += room; truncated = true; try { await reader.cancel(); } catch (_) {} break; }
+            chunks.push(value); total += value.length;
+          }
+          raw = new Uint8Array(total);
+          let o = 0; chunks.forEach(c => { raw.set(c, o); o += c.length; });
+        } else {
+          raw = new Uint8Array(await res.arrayBuffer());
+          if (raw.length > cap) { raw = raw.subarray(0, cap); truncated = true; }
+        }
+      } catch (_) {
+        if (!raw) { try { return { text: await res.text(), truncated: false, raw: null }; } catch (__) { return { text: "", truncated: false, raw: null }; } }
+      }
+      return { text: new TextDecoder("utf-8").decode(raw), truncated, raw };
+    }
+    // Cabeceras de la respuesta en minúsculas, sin set-cookie (como kino.d.ts)
+    function collectHeaders(res) {
+      const out = {};
+      try { res.headers.forEach((v, k) => { if (k.toLowerCase() !== "set-cookie") out[k.toLowerCase()] = v; }); } catch (_) {}
+      delete out["x-final-url"];
+      return out;
+    }
+
     async function smartFetch(url, options = {}) {
       const method = (options.method || "GET").toUpperCase();
-      const headers = options.headers || {};
+      // Copia: antes se escribía Content-Type en el objeto del plugin
+      const headers = Object.assign({}, options.headers || {});
+      const cap = Number(options.maxBytes) > 0 ? Math.min(2000000, Number(options.maxBytes)) : 0;
+      const manual = options.redirect === "manual";
       const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 20000;
       let body = undefined;
       if (options.body) {
@@ -891,6 +931,8 @@
             .map(k => encodeURIComponent(k) + "=" + encodeURIComponent(String(options.body.form[k])))
             .join("&");
           headers["Content-Type"] = headers["Content-Type"] || "application/x-www-form-urlencoded";
+        } else if (options.body.base64 !== undefined) {
+          body = KinoCrypto.convert ? (() => { const b = atob(String(options.body.base64).replace(/-/g, "+").replace(/_/g, "/")); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; })() : undefined;
         }
       }
 
@@ -909,9 +951,9 @@
         const t0 = Date.now();
         try {
           const res = await fetchWithTimeout(url, { method, headers: safeHeaders, body }, timeoutMs);
-          const txt = await readBodyCapped(res);
+          const { text: txt, truncated, raw } = await readBodyInfo(res, cap);
           diagLog("red", `${method} ${shortUrl} → directo → HTTP ${res.status} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
-          return { ok: res.ok, status: res.status, url: res.url || url, text: txt, headers: {} };
+          return { ok: res.ok, status: res.status, url: res.url || url, text: txt, raw, headers: collectHeaders(res), truncated };
         } catch (e) {
           diagLog("red", `${method} ${shortUrl} → directo → falla CORS/red (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
           throw e;
@@ -922,9 +964,10 @@
         const proxyName = (() => { try { return new URL(proxyPrefix).host; } catch (_) { return proxyPrefix.slice(0, 30); } })();
         const t0 = Date.now();
         try {
-          const target = proxyFor(proxyPrefix, url, headers);
+          // redirect "manual" solo lo puede cumplir el proxy propio (el navegador oculta el 3xx)
+          const target = proxyFor(proxyPrefix, url, headers) + (manual && proxyPrefix === state.customProxy ? "&redir=manual" : "");
           const res = await fetchWithTimeout(target, { method, headers: safeHeaders, body }, Math.min(timeoutMs, 15000));
-          const txt = await readBodyCapped(res);
+          const { text: txt, truncated, raw } = await readBodyInfo(res, cap);
           diagLog("red", `${method} ${shortUrl} → proxy ${proxyName} → HTTP ${res.status} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
           // Con el proxy propio, la URL final tras redirecciones (la usan plugins como CineHD Plus)
           let finalUrl = url;
@@ -932,7 +975,7 @@
           if (proxyPrefix === state.customProxy && res.status >= 500) {
             diagLog("red", `   ↳ tu proxy respondió: ${String(txt || "").slice(0, 140)}`);
           }
-          return { ok: res.ok, status: res.status, url: finalUrl, text: txt, headers: {}, via: proxyPrefix };
+          return { ok: res.ok, status: res.status, url: finalUrl, text: txt, raw, headers: proxyPrefix === state.customProxy ? collectHeaders(res) : {}, truncated, via: proxyPrefix };
         } catch (e) {
           diagLog("red", `${method} ${shortUrl} → proxy ${proxyName} → sin respuesta (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
           throw e;
@@ -1113,6 +1156,580 @@
     };
 
     // Construye el entorno `window.kino` activo para un plugin específico
+    // =========================================================================
+    // kino.crypto — implementación SÍNCRONA en JavaScript puro, según kino.d.ts
+    // (la API de Kino es síncrona; WebCrypto del navegador es asíncrono y no
+    // sirve). Antes, sha256/md5 devolvían el mismo texto y faltaban decrypt,
+    // hmac, pbkdf2...: los ~20 plugins que descifran enlaces fallaban en silencio.
+    // =========================================================================
+    const KinoCrypto = (() => {
+      const fail = (msg) => { const e = new Error(msg || "invalid crypto operation"); e.code = "crypto_error"; e.name = "KinoError_crypto_error"; return e; };
+      const te = new TextEncoder();
+      const td = new TextDecoder("utf-8");
+
+      // ---------- codificaciones ----------
+      function decode(str, enc) {
+        str = String(str === undefined || str === null ? "" : str);
+        enc = enc || "utf8";
+        if (enc === "utf8" || enc === "utf-8") return te.encode(str);
+        if (enc === "hex") {
+          const s = str.trim();
+          if (s.length % 2 || /[^0-9a-f]/i.test(s)) throw fail('"data" is not valid hex');
+          const out = new Uint8Array(s.length / 2);
+          for (let i = 0; i < out.length; i++) out[i] = parseInt(s.substr(i * 2, 2), 16);
+          return out;
+        }
+        if (enc === "base64") {
+          let s = str.replace(/[\s]/g, "").replace(/-/g, "+").replace(/_/g, "/");
+          while (s.length % 4) s += "=";
+          let bin;
+          try { bin = atob(s); } catch (_) { throw fail('"data" is not valid base64'); }
+          const out = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+          return out;
+        }
+        throw fail("unknown encoding: " + enc);
+      }
+      function encode(bytes, enc) {
+        enc = enc || "hex";
+        if (enc === "utf8" || enc === "utf-8") return td.decode(bytes);
+        if (enc === "hex") {
+          let s = "";
+          for (let i = 0; i < bytes.length; i++) s += (bytes[i] < 16 ? "0" : "") + bytes[i].toString(16);
+          return s;
+        }
+        if (enc === "base64") {
+          let bin = "";
+          for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+          return btoa(bin);
+        }
+        throw fail("unknown encoding: " + enc);
+      }
+      const concat = (...arrs) => {
+        const out = new Uint8Array(arrs.reduce((n, a) => n + a.length, 0));
+        let o = 0;
+        arrs.forEach(a => { out.set(a, o); o += a.length; });
+        return out;
+      };
+
+      // ---------- hashes ----------
+      function md5(msg) {
+        const K = new Int32Array(64), S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+        for (let i = 0; i < 64; i++) K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) | 0;
+        const len = msg.length, nBlocks = ((len + 8) >> 6) + 1;
+        const w = new Int32Array(nBlocks * 16);
+        for (let i = 0; i < len; i++) w[i >> 2] |= msg[i] << ((i % 4) * 8);
+        w[len >> 2] |= 0x80 << ((len % 4) * 8);
+        w[nBlocks * 16 - 2] = (len * 8) | 0;
+        w[nBlocks * 16 - 1] = Math.floor(len / 536870912) | 0;
+        let a0 = 0x67452301, b0 = 0xefcdab89 | 0, c0 = 0x98badcfe | 0, d0 = 0x10325476;
+        for (let blk = 0; blk < nBlocks; blk++) {
+          let A = a0, B = b0, C = c0, D = d0;
+          for (let i = 0; i < 64; i++) {
+            let F, g;
+            if (i < 16) { F = (B & C) | (~B & D); g = i; }
+            else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) % 16; }
+            else if (i < 48) { F = B ^ C ^ D; g = (3 * i + 5) % 16; }
+            else { F = C ^ (B | ~D); g = (7 * i) % 16; }
+            const s = S[(i >> 4) * 4 + (i % 4)];
+            const tmp = D; D = C; C = B;
+            const x = (A + F + K[i] + w[blk * 16 + g]) | 0;
+            B = (B + ((x << s) | (x >>> (32 - s)))) | 0;
+            A = tmp;
+          }
+          a0 = (a0 + A) | 0; b0 = (b0 + B) | 0; c0 = (c0 + C) | 0; d0 = (d0 + D) | 0;
+        }
+        const out = new Uint8Array(16);
+        [a0, b0, c0, d0].forEach((v, j) => { for (let k = 0; k < 4; k++) out[j * 4 + k] = (v >>> (k * 8)) & 255; });
+        return out;
+      }
+      function padBE(msg, lenBytes) {
+        // relleno estilo SHA: 0x80, ceros, longitud en bits big-endian (lenBytes = 8 o 16)
+        const blockSize = lenBytes === 16 ? 128 : 64;
+        const total = Math.ceil((msg.length + 1 + lenBytes) / blockSize) * blockSize;
+        const out = new Uint8Array(total);
+        out.set(msg);
+        out[msg.length] = 0x80;
+        const bits = msg.length * 8;
+        const hi = Math.floor(bits / 4294967296), lo = bits >>> 0;
+        const dv = new DataView(out.buffer);
+        dv.setUint32(total - 8, hi);
+        dv.setUint32(total - 4, lo);
+        return out;
+      }
+      function sha1(msg) {
+        const m = padBE(msg, 8), dv = new DataView(m.buffer), W = new Int32Array(80);
+        let h0 = 0x67452301, h1 = 0xefcdab89 | 0, h2 = 0x98badcfe | 0, h3 = 0x10325476, h4 = 0xc3d2e1f0 | 0;
+        for (let off = 0; off < m.length; off += 64) {
+          for (let i = 0; i < 16; i++) W[i] = dv.getInt32(off + i * 4);
+          for (let i = 16; i < 80; i++) { const x = W[i - 3] ^ W[i - 8] ^ W[i - 14] ^ W[i - 16]; W[i] = (x << 1) | (x >>> 31); }
+          let a = h0, b = h1, c = h2, d = h3, e = h4;
+          for (let i = 0; i < 80; i++) {
+            let f, k;
+            if (i < 20) { f = (b & c) | (~b & d); k = 0x5a827999; }
+            else if (i < 40) { f = b ^ c ^ d; k = 0x6ed9eba1; }
+            else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdc | 0; }
+            else { f = b ^ c ^ d; k = 0xca62c1d6 | 0; }
+            const t = (((a << 5) | (a >>> 27)) + f + e + k + W[i]) | 0;
+            e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t;
+          }
+          h0 = (h0 + a) | 0; h1 = (h1 + b) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0; h4 = (h4 + e) | 0;
+        }
+        const out = new Uint8Array(20), odv = new DataView(out.buffer);
+        [h0, h1, h2, h3, h4].forEach((v, i) => odv.setInt32(i * 4, v));
+        return out;
+      }
+      const K256 = new Int32Array([
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]);
+      function sha256(msg) {
+        const m = padBE(msg, 8), dv = new DataView(m.buffer), W = new Int32Array(64);
+        const H = new Int32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
+        const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+        for (let off = 0; off < m.length; off += 64) {
+          for (let i = 0; i < 16; i++) W[i] = dv.getInt32(off + i * 4);
+          for (let i = 16; i < 64; i++) {
+            const s0 = rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ (W[i - 15] >>> 3);
+            const s1 = rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ (W[i - 2] >>> 10);
+            W[i] = (W[i - 16] + s0 + W[i - 7] + s1) | 0;
+          }
+          let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+          for (let i = 0; i < 64; i++) {
+            const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+            const t1 = (h + S1 + ((e & f) ^ (~e & g)) + K256[i] + W[i]) | 0;
+            const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+            const t2 = (S0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+            h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+          }
+          H[0] += a; H[1] += b; H[2] += c; H[3] += d; H[4] += e; H[5] += f; H[6] += g; H[7] += h;
+        }
+        const out = new Uint8Array(32), odv = new DataView(out.buffer);
+        for (let i = 0; i < 8; i++) odv.setInt32(i * 4, H[i]);
+        return out;
+      }
+      // SHA-512 con pares de enteros de 32 bits (alto, bajo)
+      const K512 = [
+        "428a2f98d728ae22", "7137449123ef65cd", "b5c0fbcfec4d3b2f", "e9b5dba58189dbbc", "3956c25bf348b538", "59f111f1b605d019", "923f82a4af194f9b", "ab1c5ed5da6d8118",
+        "d807aa98a3030242", "12835b0145706fbe", "243185be4ee4b28c", "550c7dc3d5ffb4e2", "72be5d74f27b896f", "80deb1fe3b1696b1", "9bdc06a725c71235", "c19bf174cf692694",
+        "e49b69c19ef14ad2", "efbe4786384f25e3", "0fc19dc68b8cd5b5", "240ca1cc77ac9c65", "2de92c6f592b0275", "4a7484aa6ea6e483", "5cb0a9dcbd41fbd4", "76f988da831153b5",
+        "983e5152ee66dfab", "a831c66d2db43210", "b00327c898fb213f", "bf597fc7beef0ee4", "c6e00bf33da88fc2", "d5a79147930aa725", "06ca6351e003826f", "142929670a0e6e70",
+        "27b70a8546d22ffc", "2e1b21385c26c926", "4d2c6dfc5ac42aed", "53380d139d95b3df", "650a73548baf63de", "766a0abb3c77b2a8", "81c2c92e47edaee6", "92722c851482353b",
+        "a2bfe8a14cf10364", "a81a664bbc423001", "c24b8b70d0f89791", "c76c51a30654be30", "d192e819d6ef5218", "d69906245565a910", "f40e35855771202a", "106aa07032bbd1b8",
+        "19a4c116b8d2d0c8", "1e376c085141ab53", "2748774cdf8eeb99", "34b0bcb5e19b48a8", "391c0cb3c5c95a63", "4ed8aa4ae3418acb", "5b9cca4f7763e373", "682e6ff3d6b2b8a3",
+        "748f82ee5defb2fc", "78a5636f43172f60", "84c87814a1f0ab72", "8cc702081a6439ec", "90befffa23631e28", "a4506cebde82bde9", "bef9a3f7b2c67915", "c67178f2e372532b",
+        "ca273eceea26619c", "d186b8c721c0c207", "eada7dd6cde0eb1e", "f57d4f7fee6ed178", "06f067aa72176fba", "0a637dc5a2c898a6", "113f9804bef90dae", "1b710b35131c471b",
+        "28db77f523047d84", "32caab7b40c72493", "3c9ebe0a15c9bebc", "431d67c49c100d4c", "4cc5d4becb3e42b6", "597f299cfc657e2a", "5fcb6fab3ad6faec", "6c44198c4a475817"];
+      const K512h = new Int32Array(80), K512l = new Int32Array(80);
+      K512.forEach((h, i) => { K512h[i] = parseInt(h.slice(0, 8), 16) | 0; K512l[i] = parseInt(h.slice(8), 16) | 0; });
+      function sha512(msg) {
+        const m = padBE(msg, 16), dv = new DataView(m.buffer);
+        const Wh = new Int32Array(80), Wl = new Int32Array(80);
+        const IV = ["6a09e667f3bcc908", "bb67ae8584caa73b", "3c6ef372fe94f82b", "a54ff53a5f1d36f1", "510e527fade682d1", "9b05688c2b3e6c1f", "1f83d9abfb41bd6b", "5be0cd19137e2179"];
+        const Hh = new Int32Array(8), Hl = new Int32Array(8);
+        IV.forEach((h, i) => { Hh[i] = parseInt(h.slice(0, 8), 16) | 0; Hl[i] = parseInt(h.slice(8), 16) | 0; });
+        // suma de 64 bits sobre pares
+        let rh = 0, rl = 0;
+        const add = (ah, al, bh, bl) => { const lo = (al >>> 0) + (bl >>> 0); rl = lo | 0; rh = (ah + bh + Math.floor(lo / 4294967296)) | 0; };
+        const rotrH = (h, l, n) => n < 32 ? (h >>> n) | (l << (32 - n)) : (l >>> (n - 32)) | (h << (64 - n));
+        const rotrL = (h, l, n) => n < 32 ? (l >>> n) | (h << (32 - n)) : (h >>> (n - 32)) | (l << (64 - n));
+        for (let off = 0; off < m.length; off += 128) {
+          for (let i = 0; i < 16; i++) { Wh[i] = dv.getInt32(off + i * 8); Wl[i] = dv.getInt32(off + i * 8 + 4); }
+          for (let i = 16; i < 80; i++) {
+            const xh = Wh[i - 15], xl = Wl[i - 15];
+            const s0h = rotrH(xh, xl, 1) ^ rotrH(xh, xl, 8) ^ (xh >>> 7);
+            const s0l = rotrL(xh, xl, 1) ^ rotrL(xh, xl, 8) ^ ((xl >>> 7) | (xh << 25));
+            const yh = Wh[i - 2], yl = Wl[i - 2];
+            const s1h = rotrH(yh, yl, 19) ^ rotrH(yh, yl, 61) ^ (yh >>> 6);
+            const s1l = rotrL(yh, yl, 19) ^ rotrL(yh, yl, 61) ^ ((yl >>> 6) | (yh << 26));
+            add(Wh[i - 16], Wl[i - 16], s0h, s0l); let th = rh, tl = rl;
+            add(th, tl, Wh[i - 7], Wl[i - 7]); th = rh; tl = rl;
+            add(th, tl, s1h, s1l); Wh[i] = rh; Wl[i] = rl;
+          }
+          let ah = Hh[0], al = Hl[0], bh = Hh[1], bl = Hl[1], ch = Hh[2], cl = Hl[2], dh = Hh[3], dl = Hl[3];
+          let eh = Hh[4], el = Hl[4], fh = Hh[5], fl = Hl[5], gh = Hh[6], gl = Hl[6], hh = Hh[7], hl = Hl[7];
+          for (let i = 0; i < 80; i++) {
+            const S1h = rotrH(eh, el, 14) ^ rotrH(eh, el, 18) ^ rotrH(eh, el, 41);
+            const S1l = rotrL(eh, el, 14) ^ rotrL(eh, el, 18) ^ rotrL(eh, el, 41);
+            const chh = (eh & fh) ^ (~eh & gh), chl = (el & fl) ^ (~el & gl);
+            add(hh, hl, S1h, S1l); let t1h = rh, t1l = rl;
+            add(t1h, t1l, chh, chl); t1h = rh; t1l = rl;
+            add(t1h, t1l, K512h[i], K512l[i]); t1h = rh; t1l = rl;
+            add(t1h, t1l, Wh[i], Wl[i]); t1h = rh; t1l = rl;
+            const S0h = rotrH(ah, al, 28) ^ rotrH(ah, al, 34) ^ rotrH(ah, al, 39);
+            const S0l = rotrL(ah, al, 28) ^ rotrL(ah, al, 34) ^ rotrL(ah, al, 39);
+            const mjh = (ah & bh) ^ (ah & ch) ^ (bh & ch), mjl = (al & bl) ^ (al & cl) ^ (bl & cl);
+            add(S0h, S0l, mjh, mjl); const t2h = rh, t2l = rl;
+            hh = gh; hl = gl; gh = fh; gl = fl; fh = eh; fl = el;
+            add(dh, dl, t1h, t1l); eh = rh; el = rl;
+            dh = ch; dl = cl; ch = bh; cl = bl; bh = ah; bl = al;
+            add(t1h, t1l, t2h, t2l); ah = rh; al = rl;
+          }
+          [[ah, al], [bh, bl], [ch, cl], [dh, dl], [eh, el], [fh, fl], [gh, gl], [hh, hl]].forEach((v, i) => { add(Hh[i], Hl[i], v[0], v[1]); Hh[i] = rh; Hl[i] = rl; });
+        }
+        const out = new Uint8Array(64), odv = new DataView(out.buffer);
+        for (let i = 0; i < 8; i++) { odv.setInt32(i * 8, Hh[i]); odv.setInt32(i * 8 + 4, Hl[i]); }
+        return out;
+      }
+      const HASHES = { md5: [md5, 64], sha1: [sha1, 64], sha256: [sha256, 64], sha512: [sha512, 128] };
+      function hashFn(alg) {
+        const h = HASHES[String(alg || "").toLowerCase().replace("-", "")];
+        if (!h) throw fail("unsupported hash: " + alg);
+        return h;
+      }
+      function hmacBytes(alg, key, data) {
+        const [fn, bs] = hashFn(alg);
+        if (key.length > bs) key = fn(key);
+        const k = new Uint8Array(bs); k.set(key);
+        const ip = new Uint8Array(bs), op = new Uint8Array(bs);
+        for (let i = 0; i < bs; i++) { ip[i] = k[i] ^ 0x36; op[i] = k[i] ^ 0x5c; }
+        return fn(concat(op, fn(concat(ip, data))));
+      }
+      function pbkdf2Bytes(alg, password, salt, iterations, keyLength) {
+        const [fn] = hashFn(alg);
+        const hLen = fn(new Uint8Array(0)).length;
+        const out = new Uint8Array(keyLength);
+        for (let block = 1, pos = 0; pos < keyLength; block++) {
+          const ctr = new Uint8Array([block >>> 24, (block >>> 16) & 255, (block >>> 8) & 255, block & 255]);
+          let u = hmacBytes(alg, password, concat(salt, ctr));
+          const t = u.slice();
+          for (let i = 1; i < iterations; i++) { u = hmacBytes(alg, password, u); for (let j = 0; j < hLen; j++) t[j] ^= u[j]; }
+          out.set(t.subarray(0, Math.min(hLen, keyLength - pos)), pos);
+          pos += hLen;
+        }
+        return out;
+      }
+
+      // ---------- AES ----------
+      const SBOX = new Uint8Array(256), INV = new Uint8Array(256);
+      (() => {
+        let p = 1, q = 1;
+        do {
+          p = p ^ ((p << 1) & 255) ^ (p & 0x80 ? 0x1b : 0);
+          q ^= q << 1; q ^= q << 2; q ^= q << 4; q &= 255; if (q & 0x80) q ^= 0x09;
+          const x = q ^ ((q << 1) | (q >>> 7)) ^ ((q << 2) | (q >>> 6)) ^ ((q << 3) | (q >>> 5)) ^ ((q << 4) | (q >>> 4));
+          SBOX[p] = (x ^ 0x63) & 255;
+        } while (p !== 1);
+        SBOX[0] = 0x63;
+        for (let i = 0; i < 256; i++) INV[SBOX[i]] = i;
+      })();
+      const xt = (a) => ((a << 1) ^ (a & 0x80 ? 0x1b : 0)) & 255;
+      const mul = (a, b) => { let r = 0; while (b) { if (b & 1) r ^= a; a = xt(a); b >>= 1; } return r; };
+      function expandKey(key) {
+        const nk = key.length / 4;
+        if (![4, 6, 8].includes(nk)) throw fail("invalid key length");
+        const nr = nk + 6, w = new Uint8Array(16 * (nr + 1));
+        w.set(key);
+        let rcon = 1;
+        for (let i = nk; i < 4 * (nr + 1); i++) {
+          let t = w.slice((i - 1) * 4, i * 4);
+          if (i % nk === 0) { t = new Uint8Array([SBOX[t[1]] ^ rcon, SBOX[t[2]], SBOX[t[3]], SBOX[t[0]]]); rcon = xt(rcon); }
+          else if (nk > 6 && i % nk === 4) t = t.map(b => SBOX[b]);
+          for (let j = 0; j < 4; j++) w[i * 4 + j] = w[(i - nk) * 4 + j] ^ t[j];
+        }
+        return { w, nr };
+      }
+      function encBlock(ks, inp) {
+        const s = inp.slice(0, 16), { w, nr } = ks;
+        for (let i = 0; i < 16; i++) s[i] ^= w[i];
+        for (let r = 1; r <= nr; r++) {
+          for (let i = 0; i < 16; i++) s[i] = SBOX[s[i]];
+          let t = s[1]; s[1] = s[5]; s[5] = s[9]; s[9] = s[13]; s[13] = t;
+          t = s[2]; s[2] = s[10]; s[10] = t; t = s[6]; s[6] = s[14]; s[14] = t;
+          t = s[15]; s[15] = s[11]; s[11] = s[7]; s[7] = s[3]; s[3] = t;
+          if (r !== nr) for (let c = 0; c < 4; c++) {
+            const a0 = s[c * 4], a1 = s[c * 4 + 1], a2 = s[c * 4 + 2], a3 = s[c * 4 + 3];
+            s[c * 4] = xt(a0) ^ xt(a1) ^ a1 ^ a2 ^ a3;
+            s[c * 4 + 1] = a0 ^ xt(a1) ^ xt(a2) ^ a2 ^ a3;
+            s[c * 4 + 2] = a0 ^ a1 ^ xt(a2) ^ xt(a3) ^ a3;
+            s[c * 4 + 3] = xt(a0) ^ a0 ^ a1 ^ a2 ^ xt(a3);
+          }
+          for (let i = 0; i < 16; i++) s[i] ^= w[r * 16 + i];
+        }
+        return s;
+      }
+      function decBlock(ks, inp) {
+        const s = inp.slice(0, 16), { w, nr } = ks;
+        for (let i = 0; i < 16; i++) s[i] ^= w[nr * 16 + i];
+        for (let r = nr - 1; r >= 0; r--) {
+          let t = s[13]; s[13] = s[9]; s[9] = s[5]; s[5] = s[1]; s[1] = t;
+          t = s[2]; s[2] = s[10]; s[10] = t; t = s[6]; s[6] = s[14]; s[14] = t;
+          t = s[3]; s[3] = s[7]; s[7] = s[11]; s[11] = s[15]; s[15] = t;
+          for (let i = 0; i < 16; i++) s[i] = INV[s[i]];
+          for (let i = 0; i < 16; i++) s[i] ^= w[r * 16 + i];
+          if (r !== 0) for (let c = 0; c < 4; c++) {
+            const a0 = s[c * 4], a1 = s[c * 4 + 1], a2 = s[c * 4 + 2], a3 = s[c * 4 + 3];
+            s[c * 4] = mul(a0, 14) ^ mul(a1, 11) ^ mul(a2, 13) ^ mul(a3, 9);
+            s[c * 4 + 1] = mul(a0, 9) ^ mul(a1, 14) ^ mul(a2, 11) ^ mul(a3, 13);
+            s[c * 4 + 2] = mul(a0, 13) ^ mul(a1, 9) ^ mul(a2, 14) ^ mul(a3, 11);
+            s[c * 4 + 3] = mul(a0, 11) ^ mul(a1, 13) ^ mul(a2, 9) ^ mul(a3, 14);
+          }
+        }
+        return s;
+      }
+      const xor16 = (a, b) => { const o = new Uint8Array(16); for (let i = 0; i < 16; i++) o[i] = a[i] ^ b[i]; return o; };
+      function ctrStream(ks, counter, data, inc32only) {
+        const out = new Uint8Array(data.length), ctr = counter.slice();
+        for (let off = 0; off < data.length; off += 16) {
+          const k = encBlock(ks, ctr);
+          for (let i = 0; i < 16 && off + i < data.length; i++) out[off + i] = data[off + i] ^ k[i];
+          for (let i = 15; i >= (inc32only ? 12 : 0); i--) { ctr[i] = (ctr[i] + 1) & 255; if (ctr[i]) break; }
+        }
+        return out;
+      }
+      function gmul(X, Y) {
+        const Z = new Uint8Array(16), V = Y.slice();
+        for (let i = 0; i < 128; i++) {
+          if ((X[i >> 3] >> (7 - (i & 7))) & 1) for (let j = 0; j < 16; j++) Z[j] ^= V[j];
+          const lsb = V[15] & 1;
+          for (let j = 15; j > 0; j--) V[j] = (V[j] >>> 1) | ((V[j - 1] & 1) << 7);
+          V[0] >>>= 1;
+          if (lsb) V[0] ^= 0xe1;
+        }
+        return Z;
+      }
+      function ghash(H, aad, ct) {
+        let Y = new Uint8Array(16);
+        const feed = (d) => { for (let off = 0; off < d.length; off += 16) { const blk = new Uint8Array(16); blk.set(d.subarray(off, off + 16)); Y = gmul(xor16(Y, blk), H); } };
+        feed(aad); feed(ct);
+        const len = new Uint8Array(16), dv = new DataView(len.buffer);
+        dv.setUint32(0, Math.floor(aad.length * 8 / 4294967296)); dv.setUint32(4, (aad.length * 8) >>> 0);
+        dv.setUint32(8, Math.floor(ct.length * 8 / 4294967296)); dv.setUint32(12, (ct.length * 8) >>> 0);
+        return gmul(xor16(Y, len), H);
+      }
+      function gcm(ks, iv, data, aad, decrypting) {
+        const H = encBlock(ks, new Uint8Array(16));
+        let J0;
+        if (iv.length === 12) { J0 = new Uint8Array(16); J0.set(iv); J0[15] = 1; }
+        else J0 = ghash(H, new Uint8Array(0), iv);
+        const ctr = J0.slice();
+        for (let i = 15; i >= 12; i--) { ctr[i] = (ctr[i] + 1) & 255; if (ctr[i]) break; }
+        if (decrypting) {
+          if (data.length < 16) throw fail("invalid crypto operation");
+          const ct = data.subarray(0, data.length - 16), tag = data.subarray(data.length - 16);
+          const want = xor16(encBlock(ks, J0), ghash(H, aad, ct));
+          let diff = 0; for (let i = 0; i < 16; i++) diff |= want[i] ^ tag[i];
+          if (diff) throw fail("unable to authenticate data");
+          return ctrStream(ks, ctr, ct, true);
+        }
+        const ct = ctrStream(ks, ctr, data, true);
+        return concat(ct, xor16(encBlock(ks, J0), ghash(H, aad, ct)));
+      }
+      function cipher(alg, o, decrypting) {
+        const m = /^aes-(128|192|256)-(cbc|ecb|ctr|gcm)$/i.exec(String(alg || ""));
+        if (!m) throw fail("unsupported cipher: " + alg);
+        const key = decode(o.key, o.keyEncoding || "utf8");
+        if (key.length * 8 !== Number(m[1])) throw fail("invalid key length");
+        const mode = m[2].toLowerCase();
+        const iv = o.iv !== undefined && o.iv !== null ? decode(o.iv, o.ivEncoding || "utf8") : new Uint8Array(0);
+        const data = decode(o.data, o.inputEncoding || (decrypting ? "base64" : "utf8"));
+        const ks = expandKey(key);
+        let out;
+        if (mode === "gcm") {
+          out = gcm(ks, iv, data, o.aad ? decode(o.aad, o.aadEncoding || "utf8") : new Uint8Array(0), decrypting);
+        } else if (mode === "ctr") {
+          if (iv.length !== 16) throw fail("invalid iv length");
+          out = ctrStream(ks, iv, data, false);
+        } else {
+          if (mode === "cbc" && iv.length !== 16) throw fail("invalid iv length");
+          const pad = (o.padding || "pkcs7") !== "none";
+          let input = data;
+          if (!decrypting && pad) { const n = 16 - (data.length % 16); input = concat(data, new Uint8Array(n).fill(n)); }
+          if (input.length % 16) throw fail("data length is not a multiple of 16");
+          out = new Uint8Array(input.length);
+          let prev = iv;
+          for (let off = 0; off < input.length; off += 16) {
+            const blk = input.subarray(off, off + 16);
+            if (decrypting) {
+              let p = decBlock(ks, blk);
+              if (mode === "cbc") { p = xor16(p, prev); prev = blk.slice(); }
+              out.set(p, off);
+            } else {
+              const c = encBlock(ks, mode === "cbc" ? xor16(blk, prev) : blk);
+              if (mode === "cbc") prev = c;
+              out.set(c, off);
+            }
+          }
+          if (decrypting && pad) {
+            const n = out[out.length - 1];
+            if (!n || n > 16 || n > out.length) throw fail("bad decrypt");
+            for (let i = out.length - n; i < out.length; i++) if (out[i] !== n) throw fail("bad decrypt");
+            out = out.subarray(0, out.length - n);
+          }
+        }
+        return encode(out, o.outputEncoding || (decrypting ? "utf8" : "base64"));
+      }
+      function ige(dir, key, iv, data) {
+        if (key.length !== 32 || iv.length !== 32 || data.length % 16) throw fail("invalid crypto operation");
+        const ks = expandKey(key), out = new Uint8Array(data.length);
+        let x = iv.subarray(0, 16).slice(), y = iv.subarray(16, 32).slice();
+        // cifrar: c = E(m ^ c_prev) ^ m_prev  (c_prev = iv[0..16], m_prev = iv[16..32])
+        // descifrar: m = D(c ^ m_prev) ^ c_prev
+        for (let off = 0; off < data.length; off += 16) {
+          const blk = data.subarray(off, off + 16).slice();
+          if (dir === "encrypt") { const c = xor16(encBlock(ks, xor16(blk, x)), y); out.set(c, off); x = c; y = blk; }
+          else { const p = xor16(decBlock(ks, xor16(blk, y)), x); out.set(p, off); x = blk; y = p; }
+        }
+        return out;
+      }
+
+      return {
+        hash(alg, data, o = {}) { const [fn] = hashFn(alg); return encode(fn(decode(data, o.inputEncoding || "utf8")), o.outputEncoding || "hex"); },
+        hmac(alg, key, data, o = {}) { return encode(hmacBytes(alg, decode(key, o.keyEncoding || "utf8"), decode(data, o.inputEncoding || "utf8")), o.outputEncoding || "hex"); },
+        pbkdf2(alg, password, salt, iterations, keyLength, o = {}) {
+          iterations = Math.floor(Number(iterations)); keyLength = Math.floor(Number(keyLength));
+          if (!(iterations >= 1 && iterations <= 100000) || !(keyLength >= 1 && keyLength <= 64)) throw fail("invalid crypto operation");
+          return encode(pbkdf2Bytes(alg, decode(password, o.keyEncoding || "utf8"), decode(salt, o.inputEncoding || "utf8"), iterations, keyLength), o.outputEncoding || "hex");
+        },
+        encrypt(alg, o) { return cipher(alg, o || {}, false); },
+        decrypt(alg, o) { return cipher(alg, o || {}, true); },
+        aesIge(dir, key, iv, data, o = {}) {
+          return encode(ige(dir, decode(key, o.keyEncoding || "utf8"), decode(iv, o.ivEncoding || "utf8"), decode(data, o.inputEncoding || "utf8")), o.outputEncoding || "base64");
+        },
+        aesIgeVerify(key, iv, data, o = {}) {
+          const plain = ige("decrypt", decode(key, o.keyEncoding || "utf8"), decode(iv, o.ivEncoding || "utf8"), decode(data, o.inputEncoding || "utf8"));
+          const mac = decode(o.mac, o.macEncoding || "hex"), prefix = o.macPrefix ? decode(o.macPrefix, o.macEncoding || "hex") : new Uint8Array(0);
+          const off = o.macOffset || 0;
+          if (!Number.isInteger(off) || off < 0 || !mac.length || off + mac.length > 32) throw fail("invalid crypto operation");
+          const dig = sha256(concat(prefix, plain));
+          let diff = 0; for (let i = 0; i < mac.length; i++) diff |= dig[off + i] ^ mac[i];
+          if (diff) throw fail("the mac doesn't match");
+          return encode(plain, o.outputEncoding || "base64");
+        },
+        modPow(base, exp, mod) {
+          if (!base || !exp || !mod) throw fail("invalid crypto operation");
+          let b = BigInt("0x" + base), e = BigInt("0x" + exp); const m = BigInt("0x" + mod);
+          if (m === 0n) throw fail("invalid crypto operation");
+          let r = 1n; b %= m;
+          while (e > 0n) { if (e & 1n) r = (r * b) % m; b = (b * b) % m; e >>= 1n; }
+          const width = Math.ceil(mod.replace(/^0+/, "").length / 2) * 2;
+          return r.toString(16).padStart(width, "0");
+        },
+        convert(data, from, to) { return encode(decode(data, from), to); },
+        gunzip() { throw fail("gunzip no está disponible en el TV"); },
+        randomBytes(n, enc) {
+          n = Math.floor(Number(n));
+          if (!(n >= 1 && n <= 1024)) throw fail("invalid crypto operation");
+          const b = new Uint8Array(n); crypto.getRandomValues(b);
+          return encode(b, enc || "hex");
+        },
+        uuid() {
+          if (crypto.randomUUID) return crypto.randomUUID();
+          const b = new Uint8Array(16); crypto.getRandomValues(b); b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128;
+          const h = encode(b, "hex");
+          return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+        },
+        // Compatibilidad con la versión anterior de la app
+        sha256(d) { return encode(sha256(decode(d, "utf8")), "hex"); },
+        md5(d) { return encode(md5(decode(d, "utf8")), "hex"); }
+      };
+    })();
+
+
+    // ¿Hay un resolve en curso? (la persona pulsó reproducir). Solo entonces se
+    // permite ejecutar páginas en la caja de arena (kino.browser), como en Kino:
+    // así nunca se visitan servidores en segundo plano (eso provocaba captchas).
+    // Ventana de "la persona pulsó reproducir": 70 s, caduca sola (si un resolve
+    // se colgara, el permiso no queda abierto). Las búsquedas en segundo plano al
+    // abrir una ficha NO abren esta ventana: nunca ejecutan páginas de servidores.
+    let userPlayUntil = 0;
+    function markUserPlayIntent() { userPlayUntil = Date.now() + 70000; }
+    const userIsPlaying = () => Date.now() < userPlayUntil;
+
+    // kino.meta: la ficha del título según kino.d.ts (TMDB; sin llave, Cinemeta
+    // para ids de IMDb). Cacheada 30 min.
+    const metaCache = {};
+    async function kinoMeta(q) {
+      if (!q || typeof q !== "object") throw Object.assign(new Error("invalid_request"), { code: "invalid_request" });
+      const type = q.type === "tv" ? "series" : q.type;
+      if (type !== "movie" && type !== "series") throw Object.assign(new Error("invalid_request: type"), { code: "invalid_request" });
+      const ids = Object.assign({}, q.ids || {});
+      const ck = JSON.stringify([type, ids, q.title || "", q.year || ""]);
+      const hit = metaCache[ck];
+      if (hit && Date.now() - hit.t < 30 * 60 * 1000) return hit.v;
+      const key = state.tmdbKey;
+      const tm = async (path, params = {}) => {
+        const qs = new URLSearchParams(Object.assign({ api_key: key, language: "es-MX" }, params));
+        const r = await smartFetch(`https://api.themoviedb.org/3${path}?${qs}`, { timeoutMs: 8000 });
+        if (r.status === 429) throw Object.assign(new Error("rate_limited"), { code: "rate_limited" });
+        if (r.status === 404) return null;
+        if (!r.ok) throw Object.assign(new Error(`TMDB HTTP ${r.status}`), { code: "unavailable" });
+        return JSON.parse(r.text);
+      };
+      const norm = t => foldAccents(String(t || "").toLowerCase()).replace(/[^a-z0-9]+/g, " ").trim();
+      let ans = null;
+      if (key) {
+        let tmdbId = ids.tmdb ? Number(ids.tmdb) : 0;
+        if (!tmdbId && ids.imdb) {
+          const f = await tm(`/find/${encodeURIComponent(ids.imdb)}`, { external_source: "imdb_id" });
+          const list = f ? (type === "movie" ? f.movie_results : f.tv_results) : [];
+          if (list && list[0]) tmdbId = list[0].id;
+        }
+        if (!tmdbId && q.title) {
+          const sr = await tm(type === "movie" ? "/search/movie" : "/search/tv", Object.assign({ query: String(q.title) }, q.year ? { [type === "movie" ? "year" : "first_air_date_year"]: String(q.year) } : {}));
+          const want = norm(q.title);
+          const hits = ((sr && sr.results) || []).filter(x => norm(x.title || x.name) === want || norm(x.original_title || x.original_name) === want);
+          const yr = x => String(x.release_date || x.first_air_date || "").slice(0, 4);
+          const exact = q.year ? hits.filter(x => yr(x) === String(q.year)) : hits;
+          const pick = exact.length === 1 ? exact[0] : (!q.year && hits.length === 1 ? hits[0] : (q.year && !exact.length ? hits.filter(x => Math.abs(Number(yr(x)) - Number(q.year)) === 1) : [])[0]);
+          if (pick) tmdbId = pick.id;
+        }
+        if (tmdbId) {
+          const d = await tm(type === "movie" ? `/movie/${tmdbId}` : `/tv/${tmdbId}`, { append_to_response: "external_ids" });
+          if (d) {
+            const img = (p, sz) => p ? `https://image.tmdb.org/t/p/${sz}${p}` : undefined;
+            ans = {
+              title: d.title || d.name,
+              overview: d.overview ? String(d.overview).slice(0, 2000) : undefined,
+              year: String(d.release_date || d.first_air_date || "").slice(0, 4) || undefined,
+              poster: img(d.poster_path, "w500"),
+              backdrop: img(d.backdrop_path, "w1280"),
+              genres: (d.genres || []).map(g => g.name).slice(0, 5),
+              runtimeMinutes: type === "movie" && d.runtime ? d.runtime : undefined,
+              tagline: d.tagline || undefined,
+              ids: { tmdb: d.id, imdb: (d.external_ids && d.external_ids.imdb_id) || d.imdb_id || ids.imdb || undefined },
+              ratings: d.vote_average ? [{ source: "tmdb", value: String(Math.round(d.vote_average * 10) / 10) }] : [],
+              sources: ["tmdb"]
+            };
+            if (type === "series") {
+              const seasons = (d.seasons || []).filter(x => x.season_number > 0).slice(0, 40);
+              const eps = [];
+              await runPool(seasons, 4, async se => {
+                const sd = await tm(`/tv/${tmdbId}/season/${se.season_number}`);
+                ((sd && sd.episodes) || []).forEach(ep => eps.push({
+                  season: ep.season_number, number: ep.episode_number, title: ep.name || undefined,
+                  overview: ep.overview || undefined, still: img(ep.still_path, "w300"), airDate: ep.air_date || undefined,
+                  id: ans.ids.imdb ? `${ans.ids.imdb}:${ep.season_number}:${ep.episode_number}` : undefined
+                }));
+              });
+              ans.episodes = eps.sort((a, b) => a.season - b.season || a.number - b.number).slice(0, 5000);
+            }
+          }
+        }
+      } else if (ids.imdb) {
+        // Sin llave de TMDB: Cinemeta (catálogo de Stremio) por id de IMDb
+        try {
+          const r = await smartFetch(`${CINEMETA_BASE}/meta/${type}/${encodeURIComponent(ids.imdb)}.json`, { timeoutMs: 8000 });
+          const m = r.ok ? (JSON.parse(r.text) || {}).meta : null;
+          if (m) ans = {
+            title: m.name, overview: m.description, year: String(m.releaseInfo || m.year || "").slice(0, 4) || undefined,
+            poster: m.poster, backdrop: m.background, logo: m.logo, genres: (m.genres || []).slice(0, 5),
+            ids: { imdb: ids.imdb, tmdb: m.moviedb_id ? Number(m.moviedb_id) : undefined }, sources: ["plugin"],
+            episodes: type === "series" ? (m.videos || []).filter(v => v.season > 0).map(v => ({ season: v.season, number: v.episode || v.number, title: v.name || v.title, overview: v.overview, still: v.thumbnail, airDate: v.released, id: v.id })) : undefined
+          };
+        } catch (_) {}
+      } else {
+        const e = new Error("no_tmdb_key"); e.code = "no_tmdb_key";
+        e.userMessage = "Falta la llave de TMDB: ponla en ⚙️ Ajustes / Red";
+        throw e;
+      }
+      metaCache[ck] = { t: Date.now(), v: ans };
+      return ans;
+    }
+
     function createKinoEnv(pluginId) {
       return {
         apiVersion: 15,
@@ -1122,16 +1739,27 @@
         device: "tv",
         screen: { widgets: [], names: [], version: 1 },
         fetch: async function(url, opts = {}) {
-          const r = await smartFetch(url, opts);
+          const o = Object.assign({}, opts);
+          if (o.timeoutMs) o.timeoutMs = Math.min(30000, Math.max(1000, Number(o.timeoutMs) || 15000));
+          const r = await smartFetch(url, o);
+          let text = r.text || "";
+          let truncated = !!r.truncated;
+          if (o.stopAt) {
+            const i = text.toLowerCase().indexOf(String(o.stopAt).toLowerCase());
+            if (i >= 0) { truncated = truncated || i + o.stopAt.length < text.length; text = text.slice(0, i + o.stopAt.length); }
+          }
           return {
             ok: r.ok,
             status: r.status,
             url: r.url,
             headers: r.headers || {},
-            truncated: false,
-            text: function() { return r.text; },
-            json: function() { return JSON.parse(r.text); },
-            base64: function() { return btoa(unescape(encodeURIComponent(r.text))); }
+            truncated,
+            text: function() { return text; },
+            json: function() { return JSON.parse(text); },
+            base64: function() {
+              if (r.raw) { let bin = ""; for (let i = 0; i < r.raw.length; i += 0x8000) bin += String.fromCharCode.apply(null, r.raw.subarray(i, i + 0x8000)); return btoa(bin); }
+              return KinoCrypto.convert(text, "utf8", "base64");
+            }
           };
         },
         html: {
@@ -1157,32 +1785,58 @@
         // Navegador oculto (kino.browser, apiVersion 6+): aproximación web.
         // Descarga la página del reproductor y busca enlaces .m3u8/.mp4 en el HTML.
         // Servidores con ofuscación JS pesada (p. ej. VOE) pueden no resolverse aquí.
+        // Navegador oculto de Kino (kino.d.ts): capture() busca el video que la
+        // página del servidor pide al reproducirse; page() lee el HTML después de
+        // que corren sus scripts. Primero se lee el HTML (rápido); la ejecución
+        // en caja de arena solo durante un resolve (la persona pulsó reproducir).
         browser: {
+          captureAll: true,
           capture: async function(pageUrl, capOpts = {}) {
-            try {
-              const r = await smartFetch(String(pageUrl), { timeoutMs: capOpts.timeoutMs || 12000 });
-              if (!r.ok || !r.text) return null;
-              const media = [];
-              const seen = new Set();
-              const push = (u) => {
-                if (!u || seen.has(u)) return;
-                seen.add(u);
-                media.push({
-                  url: u,
-                  mime: /\.mp4(?:[?#]|$)/i.test(u) ? "video/mp4" : "application/vnd.apple.mpegurl",
-                  headers: { Referer: String(pageUrl) }
-                });
-              };
-              const re = /https?:\\?\/\\?\/[^"'<>\s\\]+?\.(?:m3u8|mp4)(?:\?[^"'<>\s\\]*)?/gi;
-              let m;
-              while ((m = re.exec(r.text)) !== null) push(m[0].replace(/\\\//g, "/"));
-              const matchRe = capOpts.match ? new RegExp(capOpts.match, "i") : null;
-              const filtered = matchRe ? media.filter(x => matchRe.test(x.url)) : media;
-              if (!filtered.length) return null;
-              return { url: String(pageUrl), media: filtered };
-            } catch (_) {
-              return null;
+            const url = String(pageUrl);
+            const timeoutMs = Math.min(25000, Math.max(1000, Number(capOpts.timeoutMs) || 18000));
+            const deadline = Date.now() + timeoutMs;
+            let matchRe = null;
+            try { matchRe = capOpts.match ? new RegExp(capOpts.match, "i") : null; } catch (_) {}
+            const keep = list => matchRe ? list.filter(x => matchRe.test(x.url)) : list;
+            const hdrs = capOpts.headers || {};
+            diagLog("captura", `${pluginId} pide capturar ${url.replace(/^https?:\/\//, "").slice(0, 70)}`);
+            let media = keep(await extractStatic(url, 0, deadline, hdrs));
+            if (!media.length && userIsPlaying() && Date.now() < deadline - 3000) {
+              media = keep(await sandboxCapture(url, 0, deadline, null, { headers: hdrs }));
+            } else if (!media.length) {
+              state.captureSkipped = true; // Reproducir repetirá la búsqueda con permiso
+              diagLog("captura", "   (sin ejecutar la página: no pulsaste reproducir; así se evitan visitas en segundo plano)");
             }
+            if (!media.length) {
+              if (capOpts.returnCookiesOnTimeout) return { media: [], subtitles: [], finalUrl: url, requests: [], cookies: {}, timedOut: true };
+              throw Object.assign(new Error("capture timeout: ningún video en la página"), { code: "timeout", name: "KinoError_timeout" });
+            }
+            media.sort((a, b) => (/\.m3u8|\.mpd/i.test(b.url) - /\.m3u8|\.mpd/i.test(a.url)));
+            const ua = navigator.userAgent;
+            const out = media.slice(0, 8).map(m => ({ url: m.url, mime: m.mime, headers: Object.assign({ Referer: m.referer || url, "User-Agent": ua }, hdrs.Referer ? { Referer: m.referer || url } : {}) }));
+            const ans = { media: out, subtitles: [], finalUrl: url };
+            if (capOpts.captureAll || capOpts.waitForCookie || capOpts.returnCookiesOnTimeout) {
+              ans.requests = out.slice(0, 20).map(m => ({ url: m.url, method: "GET", headers: m.headers }));
+              ans.cookies = {};
+              ans.userAgent = ua;
+            }
+            diagLog("captura", `   ✓ ${out.length} video(s): ${out[0].url.slice(0, 80)}`);
+            return ans;
+          },
+          page: async function(pageUrl, pOpts = {}) {
+            const url = String(pageUrl);
+            const timeoutMs = Math.min(25000, Math.max(1000, Number(pOpts.timeoutMs) || 15000));
+            let waitRe = null;
+            try { waitRe = pOpts.waitFor ? (pOpts.waitFor instanceof RegExp ? new RegExp(pOpts.waitFor.source, "i" + pOpts.waitFor.flags.replace(/[gi]/g, "")) : new RegExp(pOpts.waitFor, "i")) : null; } catch (_) {}
+            const r = await smartFetch(url, { timeoutMs: Math.min(timeoutMs, 15000) });
+            if (r && r.ok && r.text && !looksBlocked(r) && (!waitRe || waitRe.test(r.text))) {
+              return { html: r.text.slice(0, 2000000), finalUrl: r.url || url, status: r.status, truncated: r.text.length > 2000000 };
+            }
+            if (r && looksBlocked(r)) throw Object.assign(new Error("blocked: la página pide verificación"), { code: "blocked" });
+            // Con waitFor: dejar que corran sus scripts (sin pulsar nada) y leer el DOM
+            const res = await sandboxRunOnce(url, Date.now() + timeoutMs, null, true, { wantHtml: true, waitFor: waitRe, noClick: true, prefetched: r });
+            if (res.html) return { html: res.html.slice(0, 2000000), finalUrl: url, status: 200, truncated: res.html.length > 2000000 };
+            throw Object.assign(new Error("timeout: la página no mostró lo esperado"), { code: "timeout" });
           }
         },
         config: {
@@ -1198,17 +1852,17 @@
           get: function() { return null; },
           clear: function() {}
         },
-        crypto: {
-          sha256: function(d) { return String(d); },
-          md5: function(d) { return String(d); }
-        },
+        crypto: KinoCrypto,
+        meta: Object.assign(function(q) { return kinoMeta(q); }, { byTitle: true }),
+        // Kino reemplaza el marcador por el valor del secreto del manifiesto; aquí no hay secretos sellados
+        secret: function(name) { diagLog(pluginId, `⚠️ kino.secret("${name}") no está disponible en esta app`); return ""; },
         // Sin llave se lanza un error (como Kino): antes devolvía "0 resultados" y
         // plugins como YojaTV guardaban ese vacío y su Inicio salía en blanco
         tmdb: async function(path, params = {}) {
           const key = state.tmdbKey || (state.pluginConfigs[pluginId] && state.pluginConfigs[pluginId].tmdbKey) || "";
           if (!key) {
             const e = new Error("Falta la llave de TMDB (Ajustes / Red)");
-            e.code = "unavailable";
+            e.code = "no_tmdb_key"; // el código que define kino.d.ts
             e.userMessage = "Falta la llave de TMDB: ponla en ⚙️ Ajustes / Red";
             throw e;
           }
@@ -1231,6 +1885,7 @@
           console.log(`[Plugin ${pluginId}]`, ...a);
           diagLog(pluginId, a.map(x => typeof x === "object" ? JSON.stringify(x) : String(x)).join(" ").slice(0, 300));
         }, {
+          warn: function(...a) { diagLog(pluginId, "⚠️ " + a.map(x => typeof x === "object" ? JSON.stringify(x) : String(x)).join(" ").slice(0, 300)); },
           report: function(...a) {
             console.warn(`[Plugin ${pluginId}]`, ...a);
             diagLog(pluginId, "⚠️ " + a.map(x => typeof x === "object" ? JSON.stringify(x) : String(x)).join(" ").slice(0, 300));
@@ -1258,7 +1913,18 @@
     // Quita el BOM UTF-8 que algunos editores de Windows dejan al inicio y que
     // hace fallar JSON.parse (el plugin "no se instalaba" sin razón aparente).
     function stripBom(text) {
-      return String(text || "").replace(/^﻿/, "");
+      return String(text || "").replace(/^\uFEFF/, "");
+    }
+    // JSON tolerante como el de Kino: acepta comas sobrantes ("[1, 2,]") y
+    // comentarios //, que algunos manifiestos traen (HentaiJK, Eporner...)
+    function parseLenientJson(text) {
+      const t = stripBom(text);
+      try { return JSON.parse(t); } catch (e) {
+        // Una sola pasada que respeta los textos entre comillas
+        const cleaned = t.replace(/("(?:[^"\\]|\\.)*")|\/\/[^\n]*|\/\*[\s\S]*?\*\/|,(\s*[\]}])/g,
+          (m, str, tail) => str !== undefined ? str : (tail !== undefined ? tail : ""));
+        return JSON.parse(cleaned);
+      }
     }
 
     async function loadGitHubPluginNow(pluginEntry) {
@@ -1277,21 +1943,24 @@
       let manifest = null;
       let source = null;
       let lastManifestErr = "";
+      // El error más informativo gana: "no existe" (404) > JSON inválido > sin conexión
+      const rank = m => /404/.test(m) ? 3 : /JSON/.test(m) ? 2 : /HTTP/.test(m) ? 1 : 0;
+      const note = m => { if (rank(m) >= rank(lastManifestErr)) lastManifestErr = m; };
       for (const src of sources) {
         try {
           const r = await smartFetch(src.base + "kino-plugin.json");
-          if (!r.ok) { lastManifestErr = `HTTP ${r.status}`; continue; }
-          const parsed = JSON.parse(stripBom(r.text));
-          if (!parsed || typeof parsed !== "object") { lastManifestErr = "manifiesto vacío"; continue; }
+          if (!r.ok) { note(r.status === 404 ? "HTTP 404: el repositorio no existe, es privado o lo borraron" : `HTTP ${r.status}`); continue; }
+          const parsed = parseLenientJson(r.text);
+          if (!parsed || typeof parsed !== "object") { note("JSON: manifiesto vacío"); continue; }
           manifest = parsed;
           source = src;
           break;
         } catch (e) {
-          lastManifestErr = e instanceof SyntaxError ? "kino-plugin.json no es JSON válido" : "sin conexión";
+          note(e instanceof SyntaxError ? "kino-plugin.json no es JSON válido" : "sin conexión");
         }
       }
       if (!manifest) {
-        throw new Error(`No se pudo descargar kino-plugin.json de ${repo} (${lastManifestErr || "sin respuesta"}). ¿El repositorio existe y es público?`);
+        throw new Error(`No se pudo instalar ${repo}: ${lastManifestErr || "sin respuesta"}`);
       }
 
       // Inicializar (y guardar) los valores por defecto de configuración del manifiesto
@@ -1855,6 +2524,7 @@
     // 5. RENDERIZADO DE PANTALLAS (INICIO, BUSCAR, TIENDA DE PLUGINS, EN VIVO)
     // =========================================================================
     async function playLiveChannel(ch) {
+      markUserPlayIntent();
       if (ch.url) { startPlayback(ch.url, ch.name); return; }
       const inst = ch.pluginId && state.installed.find(x => x.id === ch.pluginId);
       if (!inst || !ch.ref) { setStatus("Este canal no tiene dirección de video"); return; }
@@ -1907,7 +2577,7 @@
         const r = await withTimeout(smartFetch(entry.stremio, { timeoutMs: 20000 }), 30000, entry.name);
         if (!r.ok) throw new Error(`El addon respondió HTTP ${r.status}`);
         let m;
-        try { m = JSON.parse(stripBom(r.text)); } catch (_) { throw new Error("La URL no devuelve un manifest.json válido"); }
+        try { m = parseLenientJson(r.text); } catch (_) { throw new Error("La URL no devuelve un manifest.json válido"); }
         if (!m || (!m.id && !Array.isArray(m.catalogs) && !Array.isArray(m.resources))) {
           throw new Error("El manifest.json no parece un addon de Stremio");
         }
@@ -2879,7 +3549,9 @@ export default {
 
     let upstream;
     try {
-      upstream = await fetch(dest.toString(), { method: request.method, headers, body, redirect: "follow" });
+      // &amp;redir=manual: devolver el 3xx con su Location (kino.fetch redirect "manual")
+      const redirect = self.searchParams.get("redir") === "manual" ? "manual" : "follow";
+      upstream = await fetch(dest.toString(), { method: request.method, headers, body, redirect });
     } catch (err) {
       return new Response("el destino no respondió: " + err, { status: 502, headers: cors(new Headers()) });
     }
@@ -3064,6 +3736,7 @@ export default {
     }
 
     async function resolvePluginRef(pluginId, ref, title) {
+      markUserPlayIntent(); // solo se llama al pulsar un episodio, un servidor alterno o Reproducir
       const inst = state.installed.find(x => x.id === pluginId);
       if (!inst) return [];
       setStatus(`Resolviendo enlaces desde ${inst.name}...`);
@@ -3112,6 +3785,7 @@ export default {
       document.getElementById("directStreamsList").innerHTML = "";
       state.directStreams = [];
       directRun++; // cancela la búsqueda de la ficha anterior
+      state.captureSkipped = false;
       state.directSearch = null;
       document.getElementById("detailOverlay").classList.add("open");
       document.getElementById("playDirectBtn").focus();
@@ -3150,7 +3824,10 @@ export default {
           }
         } catch (_) {}
 
-        try {
+        // Episodios solo para series/anime (como Kino): a una película el plugin
+        // responde "no encontrado" y ese mensaje salía en la ficha
+        const isMovie = /^(movie|pelicula|película|film|video)$/i.test(String(item.kind || ""));
+        if (!isMovie) try {
           const epRes = await withTimeout(callPluginFn(inst, "episodes", item.ref), 30000, inst.name);
           const eps = Array.isArray(epRes) ? epRes : (epRes && Array.isArray(epRes.episodes) ? epRes.episodes : []);
           // El contrato Kino devuelve la ficha de la serie junto a los episodios
@@ -3215,6 +3892,7 @@ export default {
     function findDirectStreams(item, opts = {}) {
       const run = ++directRun;
       const title = item.title;
+      if (opts.autoplay) markUserPlayIntent(); // pedido explícito (botones "Buscar otra vez" / "Buscar directo")
       // Conservar lo ya extraído de los servidores embed de esta misma ficha
       state.directStreams = state.selectedItem === item ? (state.directStreams || []).filter(d => d.extracted) : [];
       const failures = [];
@@ -3250,7 +3928,7 @@ export default {
           if (!items.length) { failures.push(`${inst.name}: sin coincidencias`); return; }
           items = kinoRank.sortBySimilarity(items, title, it => it && (it.title || it.name));
           let lastErr = null;
-          for (const match of items.slice(0, 2)) {
+          for (const match of items.slice(0, userIsPlaying() ? 2 : 1)) {
             if (!stillHere()) return;
             const targetRef = match.ref || match.id;
             if (!targetRef) continue;
@@ -3564,6 +4242,8 @@ export default {
       var iv = setInterval(function () {
         if (++tries > 14) { clearInterval(iv); return; }
         try { sweep(document); scanText(document.documentElement.innerHTML); } catch (e) {}
+        if (cfg.wantHtml) { try { post({ html: "<!DOCTYPE html>" + document.documentElement.outerHTML }); } catch (e) {} }
+        if (cfg.noClick) return; // kino.browser.page: nunca pulsa nada
         try {
           var els = document.querySelectorAll(".jw-icon-display,.jw-display-icon-container,.vjs-big-play-button,.plyr__control--overlaid,.play-button,.playbtn,.btn-play,#play,#playbtn,[class*='play-btn'],[class*='playButton'],[id*='play']");
           for (var i = 0; i < Math.min(els.length, 4); i++) { try { els[i].click(); } catch (e) {} }
@@ -3599,19 +4279,21 @@ export default {
       });
     }
 
-    function sandboxRunOnce(url, deadline, shouldStop, priority) {
+    function sandboxRunOnce(url, deadline, shouldStop, priority, opts = {}) {
       return withSandboxSlot(async () => {
         const short = url.replace(/^https?:\/\//, "").slice(0, 60);
         if (Date.now() > deadline - 2500 || (shouldStop && shouldStop())) return { found: [], frames: [] };
-        let r;
-        try { r = await smartFetch(url, { timeoutMs: Math.min(12000, deadline - Date.now()) }); } catch (_) { r = null; }
+        let r = opts.prefetched || null;
+        if (!r || !r.ok || !r.text) {
+          try { r = await smartFetch(url, { timeoutMs: Math.min(12000, deadline - Date.now()), headers: opts.headers ? Object.assign({}, opts.headers) : undefined }); } catch (_) { r = null; }
+        }
         if (!r || !r.ok || !r.text || looksBlocked(r)) {
           diagLog("captura", `✗ no se pudo descargar ${short}${r ? " (HTTP " + r.status + ")" : ""}`);
           return { found: [], frames: [] };
         }
         const token = "k" + Math.random().toString(36).slice(2);
         const proxy = state.customProxy || state.lastGoodProxy || "https://api.codetabs.com/v1/proxy?quest=";
-        const cfg = JSON.stringify({ token, proxy, page: url, custom: !!state.customProxy && proxy === state.customProxy }).replace(/</g, "\\u003c");
+        const cfg = JSON.stringify({ token, proxy, page: url, custom: !!state.customProxy && proxy === state.customProxy, noClick: !!opts.noClick, wantHtml: !!opts.wantHtml }).replace(/</g, "\\u003c");
         const inject = `<base href="${url.replace(/"/g, "&quot;")}"><script>(${kinoCaptureHook.toString()})(${cfg});<\/script>`;
         let html = r.text.replace(/<meta[^>]+http-equiv\s*=\s*["']?content-security-policy[^>]*>/gi, "");
         // Los iframes internos no se cargan aquí: se informan y la app los abre en su propia caja
@@ -3631,6 +4313,7 @@ export default {
           f.style.cssText = "position:fixed; left:-12000px; top:0; width:1280px; height:720px; opacity:0; pointer-events:none; border:0;";
           let settle = null;
           let finished = false;
+          let lastHtml = "";
           const finish = () => {
             if (finished) return;
             finished = true;
@@ -3638,7 +4321,7 @@ export default {
             clearTimeout(hard);
             window.removeEventListener("message", onMsg);
             try { f.srcdoc = ""; f.remove(); } catch (_) {}
-            resolve({ found, frames });
+            resolve({ found, frames, html: lastHtml });
           };
           const onMsg = ev => {
             const d = ev.data;
@@ -3650,6 +4333,7 @@ export default {
               if (!settle) settle = setTimeout(finish, 1500);
             }
             if (d.frame && !frames.includes(d.frame)) frames.push(d.frame);
+            if (d.html && opts.wantHtml && (!opts.waitFor || opts.waitFor.test(d.html))) { lastHtml = d.html; finish(); }
           };
           window.addEventListener("message", onMsg);
           const hard = setTimeout(finish, Math.max(3000, Math.min(12000, deadline - Date.now())));
@@ -3660,8 +4344,8 @@ export default {
     }
 
     // Captura en caja de arena, siguiendo hasta 2 niveles de iframes internos
-    async function sandboxCapture(url, depth = 0, deadline = Date.now() + 30000, shouldStop = null) {
-      const { found, frames } = await sandboxRunOnce(url, deadline, shouldStop, depth > 0);
+    async function sandboxCapture(url, depth = 0, deadline = Date.now() + 30000, shouldStop = null, opts = {}) {
+      const { found, frames } = await sandboxRunOnce(url, deadline, shouldStop, depth > 0, depth === 0 ? opts : {});
       if (found.length) {
         // .m3u8 primero, y la lista "master" antes que las de una sola calidad
         return found.sort((a, b) => (/\.m3u8/i.test(b.url) - /\.m3u8/i.test(a.url)) || (/master/i.test(b.url) - /master/i.test(a.url)));
@@ -3669,7 +4353,7 @@ export default {
       if (depth >= 2 || !frames.length || Date.now() > deadline - 3000) return [];
       for (const fr of frames.slice(0, 3)) {
         if (shouldStop && shouldStop()) return [];
-        const got = await sandboxCapture(fr, depth + 1, deadline, shouldStop);
+        const got = await sandboxCapture(fr, depth + 1, deadline, shouldStop, { headers: { Referer: url } });
         if (got.length) return got;
       }
       return [];
@@ -3684,10 +4368,10 @@ export default {
       return sandboxCapture(url, 0, Date.now() + 30000, opts.shouldStop || null);
     }
 
-    async function extractStatic(url, depth = 0, deadline = Date.now() + 20000) {
+    async function extractStatic(url, depth = 0, deadline = Date.now() + 20000, headers = null) {
       if (Date.now() > deadline) return [];
       let r;
-      try { r = await smartFetch(url, { timeoutMs: Math.min(12000, Math.max(2000, deadline - Date.now())) }); } catch (_) { return []; }
+      try { r = await smartFetch(url, { timeoutMs: Math.min(12000, Math.max(2000, deadline - Date.now())), headers: headers ? Object.assign({}, headers) : undefined }); } catch (_) { return []; }
       if (!r || !r.ok || !r.text || looksBlocked(r)) return [];
       let text = r.text;
       // Desempaquetar cada bloque eval(function(p,a,c,k,e,d){...})
@@ -4122,6 +4806,7 @@ export default {
     document.getElementById("playDirectBtn").addEventListener("click", async () => {
       const it = state.selectedItem;
       if (!it) return;
+      markUserPlayIntent();
       const playDirect = () => {
         const d = (state.directStreams || []).find(x => x.url);
         if (d) { startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime, referer: refOf(d) }); return true; }
@@ -4149,6 +4834,16 @@ export default {
           const finished = await Promise.race([allDone.then(() => true), new Promise(r => setTimeout(() => r(false), 300))]);
           if (finished) break;
         }
+        if (state.selectedItem !== it || playerUI.isOpen()) return;
+        if (playDirect()) return;
+      }
+      // 3b. La búsqueda de fondo no puede ejecutar páginas de servidores (para no
+      //     parecer un bot); ahora que pulsaste Reproducir, repetirla con permiso
+      // (solo si la de fondo se saltó alguna captura, o no hubo búsqueda: si no, sería esperar en vano)
+      const hadBackground = !!(state.directSearch && state.directSearch.item === it);
+      if (state.installed.some(i => i.address && i.enabled !== false) && (state.captureSkipped || !hadBackground)) {
+        setStatus("⏳ Buscando el video en tus plugins (máx. 40 s)...", { priority: true });
+        await Promise.race([findDirectStreams(it, { season: state.selectedSeason, episode: state.selectedEpisode }), new Promise(r => setTimeout(r, 40000))]);
         if (state.selectedItem !== it || playerUI.isOpen()) return;
         if (playDirect()) return;
       }
@@ -4194,6 +4889,7 @@ export default {
         if (src) { window.open(src.url, "_blank"); setStatus("Abierto en el navegador del TV", { priority: true }); }
       });
       document.getElementById("ncDeepBtn").addEventListener("click", async () => {
+        markUserPlayIntent();
         setStatus("🧪 Ejecutando los servidores web en caja de arena (máx. 40 s)...", { priority: true });
         await Promise.race([extractAllEmbeds(it, { deep: true }), new Promise(r => setTimeout(r, 40000))]);
         const d = (state.directStreams || []).find(x => x.url);
@@ -4208,6 +4904,7 @@ export default {
     }
 
     document.getElementById("searchAllPluginsBtn").addEventListener("click", () => {
+      markUserPlayIntent();
       if (state.selectedItem) searchStreamsAcrossPlugins(state.selectedItem.title);
     });
 

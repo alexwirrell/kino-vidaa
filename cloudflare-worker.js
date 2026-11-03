@@ -84,7 +84,9 @@ export default {
 
     let upstream;
     try {
-      upstream = await fetch(dest.toString(), { method: request.method, headers, body, redirect: "follow" });
+      // &redir=manual: devolver el 3xx con su Location (kino.fetch redirect "manual")
+      const redirect = self.searchParams.get("redir") === "manual" ? "manual" : "follow";
+      upstream = await fetch(dest.toString(), { method: request.method, headers, body, redirect });
     } catch (err) {
       return new Response("el destino no respondió: " + err, { status: 502, headers: cors(new Headers()) });
     }
