@@ -668,7 +668,9 @@
         Object.keys(hdrs).forEach(k => {
           const low = k.toLowerCase();
           if (low === "referer") ref = String(hdrs[k]);
-          else if (["user-agent", "cookie", "origin"].includes(low)) extra[k] = String(hdrs[k]);
+          // Todas las cabeceras que pide el plugin (p. ej. Caracol exige «restful: yes» y Accept),
+          // salvo las que describen la propia conexión
+          else if (!["host", "content-length", "connection", "range", "accept-encoding"].includes(low)) extra[k] = String(hdrs[k]);
         });
         if (ref) u += "&ref=" + encodeURIComponent(ref);
         if (Object.keys(extra).length) u += "&hdr=" + encodeURIComponent(JSON.stringify(extra));
@@ -812,7 +814,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r33-2026-11-05";
+    const BUILD_TAG = "r34-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -4343,7 +4345,7 @@ async function handle(request) {
         catch (e) { const l = rescued(); if (l) return l; throw e; }
         if (!res) return rescued() || [];
         const list = [];
-        if (res.url) list.push({ url: res.url, label: `${inst.name} · ${res.label || 'Principal'}`, mime: res.mime, headers: res.headers, subtitles: res.subtitles });
+        if (res.url) list.push({ url: res.url, label: `${inst.name} · ${res.label || 'Principal'}`, mime: res.mime, headers: res.headers, subtitles: res.subtitles, drm: res.drm });
         if (Array.isArray(res.copies)) {
           res.copies.forEach(c => {
             if (c && c.url) list.push({ url: c.url, label: `${inst.name} · ${c.label || 'Servidor'}`, mime: c.mime, headers: c.headers, subtitles: c.subtitles || res.subtitles });
@@ -5251,6 +5253,9 @@ async function handle(request) {
       //  hlsproxy → hls.js con TODO pasando por el proxy (CORS + http:// en página https://)
       //  proxy    → archivo completo por el proxy
       const isHls = /\.m3u8(\?|#|$)/i.test(url) || /mpegurl/i.test(opts.mime || "");
+      const listedStream = (state.directStreams || []).find(x => x.url === url);
+      const isDash = /\.mpd(\?|#|$)/i.test(url) || /dash\+xml/i.test(opts.mime || (listedStream && listedStream.mime) || "");
+      const hasDrm = !!(opts.drm || (listedStream && listedStream.drm));
       const hlsOk = !!(window.Hls && Hls.isSupported());
       const mixed = location.protocol === "https:" && /^http:\/\//i.test(url); // el TV lo bloquearía
       const nativeHls = !!video.canPlayType && /maybe|probably/.test(video.canPlayType("application/vnd.apple.mpegurl"));
@@ -5315,7 +5320,10 @@ async function handle(request) {
           }
           try { video.pause(); } catch (_) {} // p. ej. no dejar sonando un video de relleno
           setStatus("No se pudo reproducir este enlace — prueba ⏭ Siguiente o 🟡 Nativo VIDAA", { priority: true });
-          document.getElementById("nowPlayingSub").textContent = "✗ Este enlace no se pudo reproducir en el TV · ⏭ Siguiente para probar otro · detalles en 🩺 Diagnóstico";
+          document.getElementById("nowPlayingSub").textContent = (isDash || hasDrm)
+            ? `✗ Este video es DASH${hasDrm ? " con DRM (Widevine)" : ""}: la app aún no tiene reproductor para ese formato · ⏭ Siguiente para probar otro`
+            : "✗ Este enlace no se pudo reproducir en el TV · ⏭ Siguiente para probar otro · detalles en 🩺 Diagnóstico";
+          if (isDash || hasDrm) diagLog("player", `ℹ️ formato DASH${hasDrm ? " + DRM " + ((listedStream && listedStream.drm && listedStream.drm.type) || "") : ""}: no hay reproductor DASH en la app; ${state.drmSupport ? "el TV " + (state.drmSupport.widevine ? "sí" : "no") + " admite Widevine" : "soporte DRM del TV desconocido"}`);
           playerUI.osd("✗ No se pudo reproducir este enlace");
           playerUI.show(false);
           playerUI.el("playerNextServerBtn").focus();
@@ -6497,6 +6505,15 @@ async function handle(request) {
       ensureStorageHeadroom(true);
       const { used, plug } = storageUsage();
       diagLog("info", `💾 almacenamiento: ${Math.round(used / 1024)} KB usados (cachés de plugins: ${Math.round(plug / 1024)} KB)`);
+      // ¿El navegador del TV puede reproducir video con DRM? (Caracol y otros usan Widevine)
+      if (navigator.requestMediaKeySystemAccess) {
+        const cfg = [{ initDataTypes: ["cenc"], videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }] }];
+        const probe = ks => navigator.requestMediaKeySystemAccess(ks, cfg).then(() => "sí", () => "no");
+        Promise.all([probe("com.widevine.alpha"), probe("com.microsoft.playready")]).then(([w, p]) => {
+          state.drmSupport = { widevine: w === "sí", playready: p === "sí" };
+          diagLog("info", `🔐 DRM del TV: Widevine ${w} · PlayReady ${p}`);
+        });
+      } else diagLog("info", "🔐 DRM del TV: este navegador no admite video con DRM (sin EME)");
     } catch (_) {}
     // Una sola vez: borrar las respuestas de TMDB que los plugins guardaron
     // vacías mientras la app no tenía llave (si no, seguirían sin contenido)
