@@ -3251,8 +3251,16 @@
         } catch (e) {}
       }
       var _jw;
+      // Si la librería jwplayer del servidor no llega a cargar, este reemplazo
+      // igual registra la configuración (que trae el enlace) en vez de fallar
+      function jwStub() {
+        var api = { setup: function (c) { jwFile(c); return api; } };
+        try {
+          return new Proxy(api, { get: function (t, k) { return k in t ? t[k] : function () { return api; }; } });
+        } catch (e) { return api; }
+      }
       try {
-        Object.defineProperty(window, "jwplayer", { configurable: true, get: function () { return _jw; },
+        Object.defineProperty(window, "jwplayer", { configurable: true, get: function () { return _jw || jwStub; },
           set: function (v) {
             if (typeof v !== "function") { _jw = v; return; }
             _jw = function () {
@@ -3345,6 +3353,8 @@
         const cfg = JSON.stringify({ token, proxy, page: url }).replace(/</g, "\\u003c");
         const inject = `<base href="${url.replace(/"/g, "&quot;")}"><script>(${kinoCaptureHook.toString()})(${cfg});<\/script>`;
         let html = r.text.replace(/<meta[^>]+http-equiv\s*=\s*["']?content-security-policy[^>]*>/gi, "");
+        // Los iframes internos no se cargan aquí: se informan y la app los abre en su propia caja
+        html = html.replace(/<iframe\b([^>]*?)\ssrc\s*=/gi, "<iframe$1 data-src=");
         html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, m => m + inject) : inject + html;
         diagLog("captura", `▶ ejecutando ${short} en caja de arena`);
         return await new Promise(resolve => {
