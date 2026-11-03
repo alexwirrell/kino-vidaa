@@ -3094,7 +3094,326 @@
       return out;
     }
 
-    async function extractFromEmbed(url, depth = 0, deadline = Date.now() + 20000) {
+    // =========================================================================
+    // CAPTURA EN CAJA DE ARENA
+    // Muchos servidores no escriben el enlace del video en su HTML: lo piden a
+    // su API o lo descifran con JavaScript al pulsar ▶. Aquí se descarga su
+    // página, se ejecuta dentro de un iframe AISLADO (sandbox sin acceso a la
+    // app, sin ventanas emergentes y sin poder sacar a la app de su página) y,
+    // antes de que corra su código, se le inyectan "espías" en fetch, XHR,
+    // <video>, hls.js y jwplayer. Cuando su reproductor obtiene el .m3u8/.mp4,
+    // se captura y se reproduce en el reproductor propio (controlable).
+    // =========================================================================
+
+    // Esta función se ejecuta DENTRO de la caja de arena (se inyecta como texto).
+    function kinoCaptureHook(cfg) {
+      var TOKEN = cfg.token, PROXY = cfg.proxy, PAGE = cfg.page;
+      var seen = {};
+      var MEDIA = /\.(m3u8|mp4|mpd)(\?|#|$)/i;
+      var SKIP = /\.(ts|m4s|aac|key|vtt|srt|js|css|png|jpe?g|gif|webp|svg|woff2?)(\?|#|$)/i;
+      function abs(u) { try { return new URL(String(u), PAGE).href; } catch (e) { return null; } }
+      function post(msg) { try { msg.__kinoCapture = TOKEN; parent.postMessage(msg, "*"); } catch (e) {} }
+      function media(u, why) {
+        if (!u || typeof u !== "string" || /^(blob|data):/i.test(u)) return;
+        u = abs(u);
+        if (!u || !/^https?:/i.test(u) || seen[u] || SKIP.test(u)) return;
+        var forced = why === "ctype" || why === "jw" || why === "hls";
+        if (!forced && !MEDIA.test(u)) return;
+        seen[u] = 1;
+        post({ media: u, why: why });
+      }
+      function frame(u) {
+        u = abs(u);
+        if (!u || !/^https?:/i.test(u) || seen["f" + u]) return;
+        if (/google|doubleclick|facebook|twitter|disqus|recaptcha|hcaptcha|analytics|adsystem|popads|histats/i.test(u)) return;
+        seen["f" + u] = 1;
+        post({ frame: u });
+      }
+      function scanText(t) {
+        if (!t || typeof t !== "string" || t.length > 3000000) return;
+        var re = /https?:\\?\/\\?\/[^"'<>\s\\]+?\.(?:m3u8|mp4)(?:\?[^"'<>\s\\]*)?/gi, m;
+        while ((m = re.exec(t))) media(m[0].replace(/\\\//g, "/"), "text");
+      }
+      function prox(u) {
+        var a = abs(u);
+        if (!a || !/^https?:/i.test(a) || !PROXY || a.indexOf(PROXY) === 0) return u;
+        return PROXY + encodeURIComponent(a);
+      }
+      // Origen aislado: localStorage y cookies lanzarían error y romperían el reproductor
+      function mem() {
+        var d = {};
+        return { getItem: function (k) { return Object.prototype.hasOwnProperty.call(d, k) ? d[k] : null; },
+          setItem: function (k, v) { d[k] = String(v); }, removeItem: function (k) { delete d[k]; },
+          clear: function () { d = {}; }, key: function (i) { return Object.keys(d)[i] || null; },
+          get length() { return Object.keys(d).length; } };
+      }
+      try { Object.defineProperty(window, "localStorage", { value: mem(), configurable: true }); } catch (e) {}
+      try { Object.defineProperty(window, "sessionStorage", { value: mem(), configurable: true }); } catch (e) {}
+      try {
+        var jar = "";
+        Object.defineProperty(Document.prototype, "cookie", { configurable: true,
+          get: function () { return jar; },
+          set: function (v) { jar = (jar ? jar + "; " : "") + String(v).split(";")[0]; } });
+      } catch (e) {}
+      window.open = function () { return null; };
+      // Que los enlaces (publicidad) no saquen la caja de esta página
+      document.addEventListener("click", function (e) {
+        var a = e.target && e.target.closest && e.target.closest("a[href]");
+        if (a && !/^(#|javascript:)/i.test(a.getAttribute("href") || "")) e.preventDefault();
+      }, true);
+      // fetch
+      var oFetch = window.fetch;
+      if (oFetch) window.fetch = function (input, init) {
+        var u = typeof input === "string" ? input : (input && input.url);
+        media(u, "fetch");
+        var req = input;
+        try { req = typeof input === "string" ? prox(input) : (input && input.url ? new Request(prox(input.url), input) : input); } catch (e) {}
+        return oFetch.call(this, req, init).then(function (res) {
+          try {
+            var ct = (res.headers && res.headers.get("content-type")) || "";
+            if (/mpegurl|dash\+xml/i.test(ct)) media(u, "ctype");
+            if (/json|text|javascript|xml/i.test(ct)) res.clone().text().then(scanText, function () {});
+          } catch (e) {}
+          return res;
+        });
+      };
+      // XMLHttpRequest
+      var XO = XMLHttpRequest.prototype.open, XS = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (m, u) {
+        this.__ku = u;
+        media(u, "xhr");
+        var args = Array.prototype.slice.call(arguments);
+        args[1] = prox(u);
+        return XO.apply(this, args);
+      };
+      XMLHttpRequest.prototype.send = function () {
+        var x = this;
+        x.addEventListener("load", function () {
+          try {
+            var ct = x.getResponseHeader("content-type") || "";
+            if (/mpegurl|dash\+xml/i.test(ct)) media(x.__ku, "ctype");
+            if (x.responseType === "" || x.responseType === "text") scanText(x.responseText);
+            else if (x.responseType === "json") scanText(JSON.stringify(x.response));
+          } catch (e) {}
+        });
+        return XS.apply(this, arguments);
+      };
+      // <video>/<source>/<iframe>.src
+      function hookSrc(proto, fn) {
+        try {
+          var d = Object.getOwnPropertyDescriptor(proto, "src");
+          if (!d || !d.set) return;
+          Object.defineProperty(proto, "src", { configurable: true, get: function () { return d.get.call(this); },
+            set: function (v) { fn(v); return d.set.call(this, v); } });
+        } catch (e) {}
+      }
+      hookSrc(HTMLMediaElement.prototype, function (v) { media(v, "video"); });
+      hookSrc(HTMLSourceElement.prototype, function (v) { media(v, "video"); });
+      var iframeSrc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "src");
+      hookSrc(HTMLIFrameElement.prototype, function (v) { frame(v); });
+      // Los iframes internos no se cargan aquí (heredarían la caja sin espías):
+      // se informan a la app, que los ejecuta en su propia caja
+      function blank(f) { try { f.removeAttribute("src"); if (iframeSrc && iframeSrc.set) iframeSrc.set.call(f, "about:blank"); } catch (e) {} }
+      var oSet = Element.prototype.setAttribute;
+      Element.prototype.setAttribute = function (n, v) {
+        if (/^src$/i.test(n)) {
+          if (this instanceof HTMLMediaElement || this instanceof HTMLSourceElement) media(v, "video");
+          else if (this instanceof HTMLIFrameElement) frame(v);
+        }
+        return oSet.apply(this, arguments);
+      };
+      // hls.js y jwplayer (los reproductores más usados por estos servidores)
+      function wrapHls(H) {
+        try {
+          if (H && H.prototype && !H.__kino) {
+            // Accesor: también atrapa un loadSource que se asigne DESPUÉS
+            var real = H.prototype.loadSource;
+            Object.defineProperty(H.prototype, "loadSource", { configurable: true,
+              get: function () { return real && function (u) { media(u, "hls"); return real.apply(this, arguments); }; },
+              set: function (fn) { real = fn; } });
+            H.__kino = 1;
+          }
+        } catch (e) {}
+        return H;
+      }
+      var _H;
+      try { Object.defineProperty(window, "Hls", { configurable: true, get: function () { return _H; }, set: function (v) { _H = wrapHls(v); } }); } catch (e) {}
+      function jwFile(c) {
+        try {
+          scanText(JSON.stringify(c));
+          var list = [c, c.playlist && c.playlist[0]];
+          for (var i = 0; i < list.length; i++) {
+            var it = list[i];
+            if (!it) continue;
+            if (it.file) media(it.file, "jw");
+            if (it.sources) for (var j = 0; j < it.sources.length; j++) if (it.sources[j] && it.sources[j].file) media(it.sources[j].file, "jw");
+          }
+        } catch (e) {}
+      }
+      var _jw;
+      try {
+        Object.defineProperty(window, "jwplayer", { configurable: true, get: function () { return _jw; },
+          set: function (v) {
+            if (typeof v !== "function") { _jw = v; return; }
+            _jw = function () {
+              var pl = v.apply(this, arguments);
+              try {
+                if (pl && pl.setup && !pl.__kino) {
+                  var s = pl.setup;
+                  pl.setup = function (c) { jwFile(c); return s.apply(this, arguments); };
+                  pl.__kino = 1;
+                }
+              } catch (e) {}
+              return pl;
+            };
+            for (var k in v) { try { _jw[k] = v[k]; } catch (e) {} }
+          } });
+      } catch (e) {}
+      // Iframes y videos que aparecen después
+      function sweep(root) {
+        try {
+          if (root.tagName === "IFRAME" && root.getAttribute("src") && root.getAttribute("src") !== "about:blank") { frame(root.getAttribute("src")); blank(root); }
+          if ((root.tagName === "VIDEO" || root.tagName === "SOURCE") && root.src) media(root.src, "video");
+          if (root.querySelectorAll) {
+            var fs = root.querySelectorAll("iframe[src],iframe[data-src]");
+            for (var i = 0; i < fs.length; i++) {
+              var fu = fs[i].getAttribute("src") || fs[i].getAttribute("data-src");
+              if (fu && fu !== "about:blank") { frame(fu); blank(fs[i]); }
+            }
+            var vs = root.querySelectorAll("video[src],source[src]");
+            for (var j = 0; j < vs.length; j++) media(vs[j].getAttribute("src"), "video");
+          }
+        } catch (e) {}
+      }
+      try {
+        new MutationObserver(function (ms) {
+          ms.forEach(function (m) { for (var i = 0; i < m.addedNodes.length; i++) if (m.addedNodes[i].nodeType === 1) sweep(m.addedNodes[i]); });
+        }).observe(document.documentElement, { childList: true, subtree: true });
+      } catch (e) {}
+      // "Pulsar" ▶ como lo haría un puntero, varias veces mientras carga
+      var tries = 0;
+      var iv = setInterval(function () {
+        if (++tries > 14) { clearInterval(iv); return; }
+        try { sweep(document); scanText(document.documentElement.innerHTML); } catch (e) {}
+        try {
+          var els = document.querySelectorAll(".jw-icon-display,.jw-display-icon-container,.vjs-big-play-button,.plyr__control--overlaid,.play-button,.playbtn,.btn-play,#play,#playbtn,[class*='play-btn'],[class*='playButton'],[id*='play']");
+          for (var i = 0; i < Math.min(els.length, 4); i++) { try { els[i].click(); } catch (e) {} }
+          var c = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+          if (c && c.tagName !== "IFRAME") c.click();
+          var vids = document.querySelectorAll("video");
+          for (var j = 0; j < vids.length; j++) {
+            vids[j].muted = true;
+            var p = vids[j].play();
+            if (p && p.catch) p.catch(function () {});
+            if (vids[j].currentSrc) media(vids[j].currentSrc, "video");
+          }
+        } catch (e) {}
+      }, 1200);
+      post({ ready: 1 });
+    }
+
+    // Máximo 2 cajas de arena a la vez (el TV tiene poca memoria)
+    const sandboxWaiting = [];
+    let sandboxRunning = 0;
+    function withSandboxSlot(task, priority) {
+      return new Promise(resolve => {
+        const run = () => {
+          sandboxRunning++;
+          Promise.resolve().then(task).then(resolve, () => resolve({ found: [], frames: [] })).finally(() => {
+            sandboxRunning--;
+            const nxt = sandboxWaiting.shift();
+            if (nxt) nxt();
+          });
+        };
+        // Los iframes internos de un servidor van primero: suelen ser el reproductor real
+        if (sandboxRunning < 2) run(); else if (priority) sandboxWaiting.unshift(run); else sandboxWaiting.push(run);
+      });
+    }
+
+    function sandboxRunOnce(url, deadline, shouldStop, priority) {
+      return withSandboxSlot(async () => {
+        const short = url.replace(/^https?:\/\//, "").slice(0, 60);
+        if (Date.now() > deadline - 2500 || (shouldStop && shouldStop())) return { found: [], frames: [] };
+        let r;
+        try { r = await smartFetch(url, { timeoutMs: Math.min(12000, deadline - Date.now()) }); } catch (_) { r = null; }
+        if (!r || !r.ok || !r.text || looksBlocked(r)) {
+          diagLog("captura", `✗ no se pudo descargar ${short}${r ? " (HTTP " + r.status + ")" : ""}`);
+          return { found: [], frames: [] };
+        }
+        const token = "k" + Math.random().toString(36).slice(2);
+        const proxy = state.customProxy || state.lastGoodProxy || "https://api.codetabs.com/v1/proxy?quest=";
+        const cfg = JSON.stringify({ token, proxy, page: url }).replace(/</g, "\\u003c");
+        const inject = `<base href="${url.replace(/"/g, "&quot;")}"><script>(${kinoCaptureHook.toString()})(${cfg});<\/script>`;
+        let html = r.text.replace(/<meta[^>]+http-equiv\s*=\s*["']?content-security-policy[^>]*>/gi, "");
+        html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, m => m + inject) : inject + html;
+        diagLog("captura", `▶ ejecutando ${short} en caja de arena`);
+        return await new Promise(resolve => {
+          const found = [];
+          const frames = [];
+          const f = document.createElement("iframe");
+          // Sin allow-same-origin: origen aislado, no ve los datos de la app.
+          // Sin allow-top-navigation ni allow-popups: no puede sacar a la app ni abrir ventanas.
+          f.setAttribute("sandbox", "allow-scripts allow-forms");
+          f.setAttribute("allow", "autoplay");
+          f.setAttribute("tabindex", "-1");
+          f.setAttribute("aria-hidden", "true");
+          f.style.cssText = "position:fixed; left:-12000px; top:0; width:1280px; height:720px; opacity:0; pointer-events:none; border:0;";
+          let settle = null;
+          let finished = false;
+          const finish = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(settle);
+            clearTimeout(hard);
+            window.removeEventListener("message", onMsg);
+            try { f.srcdoc = ""; f.remove(); } catch (_) {}
+            resolve({ found, frames });
+          };
+          const onMsg = ev => {
+            const d = ev.data;
+            if (!d || d.__kinoCapture !== token || ev.source !== f.contentWindow) return;
+            if (d.media && !found.some(x => x.url === d.media)) {
+              found.push({ url: d.media, mime: /\.mp4(\?|#|$)/i.test(d.media) ? "video/mp4" : "application/vnd.apple.mpegurl", referer: url });
+              diagLog("captura", `✓ video capturado (${d.why}) en ${short}: ${d.media.slice(0, 80)}`);
+              // Esperar un instante por si llega la lista "master" (mejor calidad)
+              if (!settle) settle = setTimeout(finish, 1500);
+            }
+            if (d.frame && !frames.includes(d.frame)) frames.push(d.frame);
+          };
+          window.addEventListener("message", onMsg);
+          const hard = setTimeout(finish, Math.max(3000, Math.min(12000, deadline - Date.now())));
+          f.srcdoc = html;
+          document.body.appendChild(f);
+        });
+      }, priority);
+    }
+
+    // Captura en caja de arena, siguiendo hasta 2 niveles de iframes internos
+    async function sandboxCapture(url, depth = 0, deadline = Date.now() + 30000, shouldStop = null) {
+      const { found, frames } = await sandboxRunOnce(url, deadline, shouldStop, depth > 0);
+      if (found.length) {
+        // .m3u8 primero, y la lista "master" antes que las de una sola calidad
+        return found.sort((a, b) => (/\.m3u8/i.test(b.url) - /\.m3u8/i.test(a.url)) || (/master/i.test(b.url) - /master/i.test(a.url)));
+      }
+      if (depth >= 2 || !frames.length || Date.now() > deadline - 3000) return [];
+      for (const fr of frames.slice(0, 3)) {
+        if (shouldStop && shouldStop()) return [];
+        const got = await sandboxCapture(fr, depth + 1, deadline, shouldStop);
+        if (got.length) return got;
+      }
+      return [];
+    }
+
+    // Primero lo rápido (leer el HTML); si no hay enlace y se pide `deep`,
+    // ejecutar la página en la caja de arena.
+    async function extractFromEmbed(url, opts = {}) {
+      const quick = await extractStatic(url);
+      if (quick.length || !opts.deep) return quick;
+      if (opts.shouldStop && opts.shouldStop()) return [];
+      return sandboxCapture(url, 0, Date.now() + 30000, opts.shouldStop || null);
+    }
+
+    async function extractStatic(url, depth = 0, deadline = Date.now() + 20000) {
       if (Date.now() > deadline) return [];
       let r;
       try { r = await smartFetch(url, { timeoutMs: Math.min(12000, Math.max(2000, deadline - Date.now())) }); } catch (_) { return []; }
@@ -3114,20 +3433,25 @@
       }
       if (depth >= 2) return [];
       const frames = findChildFrames(r.text, url).slice(0, 6);
-      const results = await Promise.all(frames.map(f => extractFromEmbed(f, depth + 1, deadline)));
+      const results = await Promise.all(frames.map(f => extractStatic(f, depth + 1, deadline)));
       return [].concat(...results);
     }
 
     // Prueba todos los servidores embed del título a la vez y agrega lo que
     // encuentre a los enlaces directos de la ficha.
     let extractRun = 0;
-    function extractAllEmbeds(item) {
+    function extractAllEmbeds(item, opts = {}) {
       const run = ++extractRun;
       const embeds = state.activeSources.filter(x => x.type === "embed");
       if (!embeds.length) return Promise.resolve([]);
       const found = [];
+      let tried = 0;
       return Promise.all(embeds.map(async src => {
-        const media = await extractFromEmbed(src.url);
+        // En modo profundo se para en cuanto un servidor dé video
+        if (opts.deep && found.length) return;
+        const media = await extractFromEmbed(src.url, { deep: !!opts.deep, shouldStop: () => run !== extractRun || (opts.deep && found.length > 0) });
+        tried++;
+        if (opts.deep && run === extractRun && !found.length) setStatus(`⏳ Capturando el video de los servidores web (${tried}/${embeds.length})...`, { priority: true });
         if (run !== extractRun || state.selectedItem !== item) return;
         media.slice(0, 2).forEach(mv => {
           if ((state.directStreams || []).some(d => d.url === mv.url)) return;
@@ -3178,7 +3502,7 @@
       // solo al reproductor propio (con Pausa/Play/⏩/⏪ desde el mando)
       const url = src.url;
       playerUI.osd("⏳ Buscando el video para controlarlo con el mando...");
-      extractFromEmbed(url).then(media => {
+      extractFromEmbed(url, { deep: true, shouldStop: () => !playerUI.isOpen() || state.activeVideoUrl !== url }).then(media => {
         if (!playerUI.isOpen() || !playerUI.isEmbed() || state.activeVideoUrl !== url) return;
         if (!media.length) {
           playerUI.osd("Este servidor solo se reproduce con puntero: 🔄 Siguiente o 🌐 Navegador TV");
@@ -3538,7 +3862,17 @@
         if (state.selectedItem !== it || playerUI.isOpen()) return;
         if (playDirect()) return;
       }
-      // 4. Nada controlable con el mando. Antes se abría la página embed, cuyo ▶
+      // 4. Ejecutar las páginas de los servidores web en la caja de arena y
+      //    capturar el video que su reproductor pide al pulsar ▶
+      if (state.activeSources.some(x => x.type === "embed")) {
+        setStatus("⏳ Capturando el video de los servidores web (máx. 40 s)...", { priority: true });
+        const deep = extractAllEmbeds(it, { deep: true });
+        state.extractSearch = { item: it, promise: deep };
+        await Promise.race([deep, new Promise(r => setTimeout(r, 40000))]);
+        if (state.selectedItem !== it || playerUI.isOpen()) return;
+        if (playDirect()) return;
+      }
+      // 5. Nada controlable con el mando. Antes se abría la página embed, cuyo ▶
       //    no se puede pulsar con el control: ahora se explica y se ofrecen
       //    opciones en vez de dejar un video atascado.
       if (state.activeSources.length) {
