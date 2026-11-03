@@ -359,6 +359,18 @@
     #playerOverlay.hud-hidden .player-hud { opacity: 0; transform: translateY(40px); pointer-events: none; }
     #playerOverlay.hud-hidden { cursor: none; }
     #playerOverlay.mode-embed .video-only, #playerOverlay.mode-video .embed-only { display: none; }
+    /* Subtítulos: legibles a 3 metros del TV */
+    #videoPlayer::cue { font-size: 2.6vw; line-height: 1.25; color: #fff; background: rgba(0, 0, 0, 0.62); font-family: 'Inter', system-ui, sans-serif; }
+    #playerOverlay.subs-big #videoPlayer::cue { font-size: 3.6vw; }
+    .subs-panel {
+      position: absolute; right: 36px; bottom: 120px; z-index: 7; width: min(560px, 80vw); max-height: 60vh; overflow-y: auto;
+      background: rgba(14, 16, 24, 0.96); border: 1px solid rgba(255,255,255,0.16); border-radius: 14px; padding: 14px; display: none;
+    }
+    .subs-panel.open { display: block; }
+    .subs-panel h4 { font-size: 15px; margin: 0 0 10px; }
+    .subs-opt { display: block; width: 100%; text-align: left; background: var(--panel-alt); color: var(--text); border: 2px solid var(--border); border-radius: 10px; padding: 10px 14px; margin-bottom: 6px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .subs-opt.active { border-color: var(--green); }
+    .subs-note { font-size: 12px; color: var(--muted); margin: 4px 2px 10px; }
     .player-hud .btn-group { flex-wrap: nowrap; flex-shrink: 0; }
     .hud-info { flex: 1; min-width: 0; }
     .hud-progress { display: flex; align-items: center; gap: 12px; margin-top: 10px; font-size: 13px; color: var(--muted); }
@@ -477,6 +489,7 @@
     <video id="videoPlayer" playsinline></video>
     <iframe id="webPlayerFrame" tabindex="-1" style="display:none;" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>
     <div class="player-osd" id="playerOsd"></div>
+    <div class="subs-panel" id="subsPanel"><h4>💬 Subtítulos</h4><div id="subsList"></div></div>
     <div class="player-hud" id="playerHud">
       <div class="hud-info">
         <div id="nowPlayingTitle" style="font-size: 18px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Reproduciendo...</div>
@@ -492,6 +505,7 @@
         <button class="action-btn small focusable video-only" id="playerFwdBtn">10 s ⏩</button>
         <button class="action-btn small focusable embed-only" id="playerDirectBtn">⚡ Buscar directo</button>
         <button class="action-btn small focusable embed-only" id="playerBrowserBtn">🌐 Navegador TV</button>
+        <button class="action-btn secondary small focusable video-only" id="playerSubsBtn">💬 Subtítulos</button>
         <button class="action-btn blue small focusable" id="playerNextServerBtn">🔄 Siguiente</button>
         <button class="action-btn secondary small focusable" id="playerNativeHandoffBtn">🟡 Nativo</button>
         <button class="action-btn secondary small focusable" id="closePlayerBtn">✖ Cerrar</button>
@@ -715,7 +729,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r17-2026-11-04";
+    const BUILD_TAG = "r18-2026-11-04";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -2544,6 +2558,7 @@
             synopsis: it.overview || it.synopsis || it.description || "",
             kind: it.kind || it.type || "movie",
             video: it.url || it.video || "",
+            ids: it.ids || undefined,
             pluginId: inst.id,
             source: inst.name
           }))
@@ -2738,14 +2753,14 @@
     // =========================================================================
     async function playLiveChannel(ch) {
       markUserPlayIntent();
-      if (ch.url) { startPlayback(ch.url, ch.name); return; }
+      if (ch.url) { startPlayback(ch.url, ch.name, { live: true }); return; }
       const inst = ch.pluginId && state.installed.find(x => x.id === ch.pluginId);
       if (!inst || !ch.ref) { setStatus("Este canal no tiene dirección de video"); return; }
       setStatus(`Resolviendo canal ${ch.name}...`);
       try {
         const r = await withTimeout(callPluginFn(inst, "resolve", ch.ref), 30000, inst.name);
         const streamUrl = r && (r.url || (Array.isArray(r.copies) && r.copies[0] && r.copies[0].url));
-        if (streamUrl) startPlayback(streamUrl, ch.name, { mime: r.mime, referer: refOf(r) });
+        if (streamUrl) startPlayback(streamUrl, ch.name, { mime: r.mime, referer: refOf(r), live: true });
         else setStatus("No se pudo obtener el video del canal");
       } catch (e) {
         setStatus(`✗ ${ch.name}: ${(e && (e.userMessage || e.message)) || "no disponible"}`, { priority: true });
@@ -3952,17 +3967,17 @@ export default {
         `;
         row.querySelector("[data-play-web]").addEventListener("click", e => {
           e.stopPropagation();
-          startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { mime: s.mime, referer: refOf(s) });
+          startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { mime: s.mime, referer: refOf(s), subtitles: s.subtitles });
         });
         row.querySelector("[data-play-proxy]").addEventListener("click", e => {
           e.stopPropagation();
-          startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { viaProxy: true, mime: s.mime, referer: refOf(s) });
+          startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { viaProxy: true, mime: s.mime, referer: refOf(s), subtitles: s.subtitles });
         });
         row.querySelector("[data-play-native]").addEventListener("click", e => {
           e.stopPropagation();
           handoffToVidaaNativePlayer(s.url, title);
         });
-        row.addEventListener("click", () => startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { mime: s.mime, referer: refOf(s) }));
+        row.addEventListener("click", () => startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { mime: s.mime, referer: refOf(s), subtitles: s.subtitles }));
         streamsList.appendChild(row);
       });
     }
@@ -3977,10 +3992,10 @@ export default {
         const res = await withTimeout(callPluginFn(inst, "resolve", ref), 65000, inst.name);
         if (!res) return [];
         const list = [];
-        if (res.url) list.push({ url: res.url, label: `${inst.name} · ${res.label || 'Principal'}`, mime: res.mime, headers: res.headers });
+        if (res.url) list.push({ url: res.url, label: `${inst.name} · ${res.label || 'Principal'}`, mime: res.mime, headers: res.headers, subtitles: res.subtitles });
         if (Array.isArray(res.copies)) {
           res.copies.forEach(c => {
-            if (c && c.url) list.push({ url: c.url, label: `${inst.name} · ${c.label || 'Servidor'}`, mime: c.mime, headers: c.headers });
+            if (c && c.url) list.push({ url: c.url, label: `${inst.name} · ${c.label || 'Servidor'}`, mime: c.mime, headers: c.headers, subtitles: c.subtitles || res.subtitles });
           });
         }
         // Contrato Kino: `alternatives` son refs diferidas (c:...@n) que se resuelven al elegirlas
@@ -4077,7 +4092,11 @@ export default {
               b.className = "ep-btn focusable";
               const epLabel = (ep.season ? `T${ep.season}:` : "") + `E${ep.number || ep.episode || 1} - ${ep.title || ep.name || "Capítulo"}`;
               b.textContent = epLabel;
-              b.addEventListener("click", () => resolvePluginRef(inst.id, ep.ref || ep.id, `${item.title} ${epLabel}`));
+              b.addEventListener("click", () => {
+                state.selectedSeason = Number(ep.season) || 1; // para buscar los subtítulos del episodio
+                state.selectedEpisode = Number(ep.number || ep.episode) || 1;
+                resolvePluginRef(inst.id, ep.ref || ep.id, `${item.title} ${epLabel}`);
+              });
               epGrid.appendChild(b);
             });
           }
@@ -4143,7 +4162,7 @@ export default {
         renderStreamOptions(state.directStreams, title, { pending: true });
         if (opts.autoplay && !autoplayed && !playerUI.isOpen()) {
           const first = state.directStreams.find(x => x.url);
-          if (first) { autoplayed = true; startPlayback(first.url, `${title} (${first.label})`, { mime: first.mime, referer: refOf(first) }); }
+          if (first) { autoplayed = true; startPlayback(first.url, `${title} (${first.label})`, { mime: first.mime, referer: refOf(first), subtitles: first.subtitles }); }
         }
       };
       const kindType = opts.season ? "series" : (item.kind === "series" ? "series" : "movie");
@@ -4167,7 +4186,7 @@ export default {
             try {
               const resolved = await withTimeout(callPluginFn(inst, "resolve", targetRef), 40000, inst.name);
               const before = state.directStreams.length;
-              if (resolved && resolved.url) state.directStreams.push({ url: resolved.url, label: `${inst.name} · ${resolved.label || match.title || "Principal"}`, mime: resolved.mime, headers: resolved.headers });
+              if (resolved && resolved.url) state.directStreams.push({ url: resolved.url, label: `${inst.name} · ${resolved.label || match.title || "Principal"}`, mime: resolved.mime, headers: resolved.headers, subtitles: resolved.subtitles });
               if (resolved && Array.isArray(resolved.copies)) resolved.copies.forEach(c => { if (c && c.url) state.directStreams.push({ url: c.url, label: `${inst.name} · ${c.label || "Opción"}`, mime: c.mime, headers: c.headers }); });
               if (resolved && Array.isArray(resolved.alternatives)) resolved.alternatives.forEach(a => { if (a && a.ref) state.directStreams.push({ lazyRef: a.ref, lazyPluginId: inst.id, label: `${inst.name} · ${a.label || "Servidor alterno"}` }); });
               if (state.directStreams.length > before) { publish(); return; }
@@ -4669,6 +4688,7 @@ export default {
 
     function startEmbedPlayback(src, title) {
       playbackRun++; // cancela los intentos pendientes de un video anterior
+      Subs.run++; Subs.clear(); // una página embed no admite subtítulos propios
       state.activeVideoUrl = src.url;
       document.getElementById("nowPlayingTitle").textContent = `${title || "Reproduciendo"} — ${src.name}`;
       document.getElementById("nowPlayingSub").textContent = "Servidor web: su botón ▶ solo se pulsa con puntero. Si no arranca solo: ⚡ Buscar directo o 🌐 Navegador TV · ▼: ocultar barra · Back: Salir";
@@ -4700,7 +4720,7 @@ export default {
           return;
         }
         playerUI.osd("⚡ Video encontrado: ya se controla con el mando");
-        startPlayback(media[0].url, `${title || "Reproduciendo"} — ${src.name}`, { mime: media[0].mime, referer: refOf(media[0]) });
+        startPlayback(media[0].url, `${title || "Reproduciendo"} — ${src.name}`, { mime: media[0].mime, referer: refOf(media[0]), subtitles: media[0].subtitles });
       });
     }
 
@@ -4847,6 +4867,8 @@ export default {
         }
       };
       nextStage();
+      // Subtítulos: los del propio video y los de las fuentes de subtítulos
+      Subs.start(opts.subtitles || [], opts.live ? null : state.selectedItem);
       // Foco en Pausa/Play (antes en Cerrar: un OK de más cerraba el video)
       playerUI.show(true);
     }
@@ -4884,6 +4906,7 @@ export default {
       hide(force) {
         clearTimeout(this.hideTimer);
         if (!this.isOpen()) return;
+        if (document.getElementById("subsPanel").classList.contains("open")) return; // eligiendo subtítulos
         // Con el video en pausa la barra se queda visible (salvo que se pida con ▼)
         if (!force && !this.isEmbed() && this.video().paused && this.video().currentSrc) return;
         this.overlay().classList.add("hud-hidden");
@@ -4988,6 +5011,11 @@ export default {
         (k === "MediaFastForward" || c === 417) ? "ff" :
         (k === "MediaRewind" || c === 412) ? "rw" :
         (k === "MediaStop" || c === 413) ? "stop" : null;
+      if (c === 460 || k === "Subtitle") { // tecla de subtítulos del control
+        e.preventDefault();
+        if (!playerUI.isEmbed()) { playerUI.show(false); Subs.isOpen() ? Subs.closePanel() : Subs.openPanel(); }
+        return true;
+      }
       if (media) {
         e.preventDefault();
         if (media === "toggle") playerUI.togglePlay();
@@ -5007,6 +5035,8 @@ export default {
         playerUI.show(true); // cualquier otra tecla: mostrar la barra
         return true;
       }
+      // Con el panel de subtítulos abierto, las flechas recorren sus opciones
+      if (Subs.isOpen()) { clearTimeout(playerUI.hideTimer); return false; }
       // ▼ con la barra visible: ocultarla (antes no había forma de quitarla)
       if (k === "ArrowDown") {
         e.preventDefault();
@@ -5017,6 +5047,246 @@ export default {
       playerUI.scheduleHide(); // actividad con la barra visible: reiniciar el temporizador
       return false;
     }
+
+    // =========================================================================
+    // SUBTÍTULOS
+    // Fuentes (como Kino): 1) los que trae el propio video (stream.subtitles),
+    // 2) plugins con subtitles(query), 3) addons de Stremio de subtítulos
+    // instalados y 4) OpenSubtitles v3 si no hay ninguno instalado.
+    // El archivo se descarga por el proxy (sin CORS), se detecta su codificación
+    // (UTF-8 o Windows-1252, típica de los .srt en español), se convierte SRT→VTT
+    // y se monta como <track> del reproductor propio.
+    // =========================================================================
+    const SUB_LANGS = {
+      spa: "es", es: "es", "es-419": "es", "es-mx": "es", "es-es": "es", lat: "es", eng: "en", en: "en",
+      por: "pt", pob: "pt", pt: "pt", "pt-br": "pt", fre: "fr", fra: "fr", fr: "fr", ita: "it", it: "it",
+      ger: "de", deu: "de", de: "de", jpn: "ja", ja: "ja", kor: "ko", ko: "ko", chi: "zh", zho: "zh", zh: "zh",
+      rus: "ru", ru: "ru", ara: "ar", ar: "ar", cat: "ca", ca: "ca"
+    };
+    const SUB_NAMES = { es: "Español", en: "Inglés", pt: "Portugués", fr: "Francés", it: "Italiano", de: "Alemán", ja: "Japonés", ko: "Coreano", zh: "Chino", ru: "Ruso", ar: "Árabe", ca: "Catalán" };
+    const normLang = l => {
+      const k = String(l || "").toLowerCase().trim();
+      return SUB_LANGS[k] || SUB_LANGS[k.split(/[-_]/)[0]] || k.slice(0, 2) || "??";
+    };
+    const OPENSUBS_V3 = "https://opensubtitles-v3.strem.io/manifest.json";
+
+    const Subs = {
+      prefs: Object.assign({ lang: "es", size: "normal" }, loadStore("kino_sub_prefs", {})),
+      tracks: [],      // [{ id, lang, label, source, url, format }]
+      current: null,   // id del track mostrado
+      run: 0,
+      blobUrls: [],
+      savePrefs() { saveStore("kino_sub_prefs", this.prefs); },
+
+      // Qué título se reproduce (ids de IMDb/TMDB, temporada y episodio)
+      async contextFor(item) {
+        if (!item) return null;
+        const kind = /series|anime|tv/i.test(String(item.kind || "")) ? "series" : "movie";
+        const ids = Object.assign({}, item.ids || {});
+        let imdb = item.imdbId || ids.imdb || (item.rawId && /^tt\d+/.test(item.rawId) ? item.rawId.split(":")[0] : "") || "";
+        let tmdb = ids.tmdb ? Number(ids.tmdb) : 0;
+        if (!tmdb && item.ref && /^(?:m|s|tv|movie):?(\d+)$/.test(String(item.ref))) tmdb = Number(String(item.ref).replace(/\D/g, ""));
+        if (!imdb && (tmdb || item.title) && state.tmdbKey) {
+          try {
+            const meta = await kinoMeta(tmdb ? { type: kind, ids: { tmdb } } : { type: kind, title: item.title, year: item.year ? String(item.year).slice(0, 4) : undefined });
+            if (meta && meta.ids) { imdb = meta.ids.imdb || imdb; tmdb = meta.ids.tmdb || tmdb; }
+          } catch (_) {}
+        }
+        return {
+          kind, imdbId: imdb || undefined, tmdbId: tmdb || undefined, title: item.title,
+          year: item.year ? Number(String(item.year).slice(0, 4)) || undefined : undefined,
+          season: kind === "series" ? (state.selectedSeason || 1) : undefined,
+          episode: kind === "series" ? (state.selectedEpisode || 1) : undefined
+        };
+      },
+
+      add(list, source) {
+        (list || []).forEach(t => {
+          if (!t || !t.url || this.tracks.some(x => x.url === t.url)) return;
+          const lang = normLang(t.lang || t.language);
+          this.tracks.push({
+            id: "s" + this.tracks.length + Math.random().toString(36).slice(2, 6),
+            lang, url: String(t.url), format: t.format || (/\.srt(\?|$)/i.test(t.url) ? "srt" : (/\.vtt(\?|$)/i.test(t.url) ? "vtt" : "")),
+            label: `${SUB_NAMES[lang] || lang.toUpperCase()}${t.label ? " · " + String(t.label).slice(0, 30) : ""}${t.translated ? " (automático)" : ""}`,
+            source
+          });
+        });
+        // Idioma preferido primero, luego inglés; como mucho 30
+        const rank = t => t.lang === this.prefs.lang ? 0 : t.lang === "es" ? 1 : t.lang === "en" ? 2 : 3;
+        this.tracks.sort((a, b) => rank(a) - rank(b));
+        this.tracks = this.tracks.slice(0, 30);
+        this.updateButton();
+      },
+
+      // Se llama al empezar un video en el reproductor propio
+      async start(streamSubs, item) {
+        const run = ++this.run;
+        this.clear();
+        this.add(streamSubs, "del video");
+        this.autoPick(run);
+        const ctx = await this.contextFor(item);
+        if (run !== this.run || !ctx) return;
+        const langs = Array.from(new Set([this.prefs.lang === "off" ? "es" : this.prefs.lang, "es", "en"]));
+        const jobs = [];
+        // Plugins instalados con subtitles(query)
+        state.installed.filter(i => i.address && i.enabled !== false).forEach(inst => {
+          jobs.push((async () => {
+            const mod = await withTimeout(loadGitHubPlugin(inst), 10000, inst.name).catch(() => null);
+            if (!mod || !mod.exports || typeof mod.exports.subtitles !== "function") return;
+            const res = await withTimeout(callPluginFn(inst, "subtitles", Object.assign({ languages: langs }, ctx)), 12000, inst.name).catch(() => null);
+            if (run === this.run && Array.isArray(res)) this.add(res, inst.name);
+          })());
+        });
+        // Addons de Stremio de subtítulos (por id de IMDb)
+        if (ctx.imdbId) {
+          let addons = state.installed.filter(i => i.stremio && i.enabled !== false && (/sub/i.test(i.id) || /subtit/i.test(i.name || "")));
+          if (!addons.length) addons = [{ id: "opensubtitles-v3", name: "OpenSubtitles", stremio: OPENSUBS_V3 }];
+          const vid = ctx.kind === "series" ? `${ctx.imdbId}:${ctx.season}:${ctx.episode}` : ctx.imdbId;
+          addons.forEach(a => {
+            jobs.push((async () => {
+              const base = a.stremio.replace(/\/manifest\.json$/i, "");
+              const r = await smartFetch(`${base}/subtitles/${ctx.kind}/${encodeURIComponent(vid)}.json`, { timeoutMs: 12000 }).catch(() => null);
+              if (!r || !r.ok) return;
+              let d; try { d = parseLenientJson(r.text); } catch (_) { return; }
+              const list = (d && Array.isArray(d.subtitles) ? d.subtitles : []).filter(s => langs.includes(normLang(s.lang)));
+              if (run === this.run) this.add(list.map(s => ({ lang: s.lang, url: s.url })), a.name);
+            })());
+          });
+        }
+        await Promise.all(jobs.map(j => j.catch(() => {})));
+        if (run !== this.run) return;
+        diagLog("subtítulos", `${this.tracks.length} disponibles${ctx.imdbId ? " para " + ctx.imdbId : " (sin id de IMDb: pon la llave de TMDB para buscar más)"}`);
+        this.autoPick(run);
+      },
+
+      autoPick(run) {
+        if (run !== this.run || this.current || this.prefs.lang === "off") return;
+        const t = this.tracks.find(x => x.lang === this.prefs.lang);
+        if (t) this.select(t.id, true);
+      },
+
+      decodeText(raw, text) {
+        if (!raw) return text || "";
+        try { return new TextDecoder("utf-8", { fatal: true }).decode(raw); }
+        catch (_) { try { return new TextDecoder("windows-1252").decode(raw); } catch (__) { return text || ""; } }
+      },
+
+      toVtt(text, format) {
+        let t = String(text || "").replace(/^﻿/, "").replace(/\r\n?/g, "\n");
+        if (format === "vtt" || /^WEBVTT/.test(t.trimStart())) return t.trimStart().startsWith("WEBVTT") ? t : "WEBVTT\n\n" + t;
+        // SRT → VTT: tiempos con punto y sin numeración obligatoria
+        const body = t.replace(/(\d{1,2}:\d{2}:\d{2}),(\d{1,3})/g, (m, a, b) => `${a.padStart(8, "0")}.${b.padEnd(3, "0")}`)
+          .replace(/<\/?font[^>]*>/gi, "").replace(/\{\\[^}]*\}/g, "");
+        return "WEBVTT\n\n" + body;
+      },
+
+      async select(id, auto) {
+        const video = document.getElementById("videoPlayer");
+        if (!id) {
+          this.current = null;
+          Array.from(video.textTracks || []).forEach(tt => { tt.mode = "disabled"; });
+          if (!auto) { this.prefs.lang = "off"; this.savePrefs(); playerUI.osd("💬 Sin subtítulos"); }
+          this.updateButton();
+          return;
+        }
+        const t = this.tracks.find(x => x.id === id);
+        if (!t) return;
+        const run = this.run;
+        try {
+          if (!t.blob) {
+            const r = await smartFetch(t.url, { timeoutMs: 15000 });
+            if (!r || !r.ok) throw new Error("HTTP " + (r && r.status));
+            const vtt = this.toVtt(this.decodeText(r.raw, r.text), t.format);
+            if (!/-->/.test(vtt)) throw new Error("archivo sin subtítulos");
+            t.blob = URL.createObjectURL(new Blob([vtt], { type: "text/vtt" }));
+            this.blobUrls.push(t.blob);
+          }
+          if (run !== this.run) return;
+          let el = video.querySelector(`track[data-sub="${t.id}"]`);
+          if (!el) {
+            el = document.createElement("track");
+            el.kind = "subtitles"; el.srclang = t.lang; el.label = t.label; el.src = t.blob; el.dataset.sub = t.id;
+            video.appendChild(el);
+          }
+          Array.from(video.textTracks || []).forEach(tt => { tt.mode = "disabled"; });
+          const tt = el.track;
+          tt.mode = "showing";
+          this.current = t.id;
+          if (!auto) { this.prefs.lang = t.lang; this.savePrefs(); }
+          playerUI.osd(`💬 ${t.label}`);
+          diagLog("subtítulos", `✓ ${t.label} (${t.source})`);
+        } catch (e) {
+          diagLog("subtítulos", `✗ ${t.label}: ${e.message || e}`);
+          t.broken = true;
+          if (!auto) playerUI.osd("✗ No se pudo cargar ese subtítulo");
+          else { const next = this.tracks.find(x => x.lang === t.lang && !x.broken && x.id !== t.id); if (next) return this.select(next.id, true); }
+        }
+        this.updateButton();
+      },
+
+      clear() {
+        const video = document.getElementById("videoPlayer");
+        Array.from(video.querySelectorAll("track[data-sub]")).forEach(el => el.remove());
+        this.blobUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (_) {} });
+        this.blobUrls = [];
+        this.tracks = [];
+        this.current = null;
+        this.closePanel();
+        this.updateButton();
+      },
+
+      applySize() {
+        document.getElementById("playerOverlay").classList.toggle("subs-big", this.prefs.size === "big");
+      },
+
+      updateButton() {
+        const b = document.getElementById("playerSubsBtn");
+        if (!b) return;
+        const cur = this.tracks.find(x => x.id === this.current);
+        b.textContent = cur ? `💬 ${SUB_NAMES[cur.lang] || cur.lang.toUpperCase()}` : (this.tracks.length ? `💬 Subtítulos (${this.tracks.length})` : "💬 Subtítulos");
+      },
+
+      isOpen() { return document.getElementById("subsPanel").classList.contains("open"); },
+      openPanel() {
+        const panel = document.getElementById("subsPanel");
+        const list = document.getElementById("subsList");
+        list.innerHTML = "";
+        const mk = (label, active, fn) => {
+          const btn = document.createElement("button");
+          btn.className = "subs-opt focusable" + (active ? " active" : "");
+          btn.textContent = (active ? "✓ " : "") + label;
+          btn.addEventListener("click", fn);
+          list.appendChild(btn);
+          return btn;
+        };
+        const first = mk("Sin subtítulos", !this.current, () => { this.select(null); this.closePanel(); });
+        if (!this.tracks.length) {
+          const note = document.createElement("div");
+          note.className = "subs-note";
+          note.textContent = "Buscando subtítulos… (OpenSubtitles y tus plugins de subtítulos)";
+          list.appendChild(note);
+        }
+        this.tracks.slice(0, 14).forEach(t => mk(`${t.label} — ${t.source}${t.broken ? " ✗" : ""}`, t.id === this.current, () => { this.select(t.id); this.closePanel(); }));
+        mk(`🔠 Tamaño: ${this.prefs.size === "big" ? "Grande" : "Normal"}`, false, () => {
+          this.prefs.size = this.prefs.size === "big" ? "normal" : "big";
+          this.savePrefs(); this.applySize(); this.openPanel();
+        });
+        panel.classList.add("open");
+        clearTimeout(playerUI.hideTimer);
+        playerUI.overlay().classList.remove("hud-hidden");
+        (list.querySelector(".subs-opt.active") || first).focus();
+      },
+      closePanel() {
+        const panel = document.getElementById("subsPanel");
+        if (!panel || !panel.classList.contains("open")) return;
+        panel.classList.remove("open");
+        const b = document.getElementById("playerSubsBtn");
+        if (b && playerUI.isOpen()) b.focus();
+        playerUI.scheduleHide();
+      }
+    };
+    Subs.applySize();
+    document.getElementById("playerSubsBtn").addEventListener("click", () => Subs.isOpen() ? Subs.closePanel() : Subs.openPanel());
 
     function handoffToVidaaNativePlayer(url, title) {
       if (!url) return;
@@ -5041,7 +5311,7 @@ export default {
       markUserPlayIntent();
       const playDirect = () => {
         const d = (state.directStreams || []).find(x => x.url);
-        if (d) { startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime, referer: refOf(d) }); return true; }
+        if (d) { startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime, referer: refOf(d), subtitles: d.subtitles }); return true; }
         return false;
       };
       // 1. Enlace directo (se controla con el mando) o el video propio del título
@@ -5051,7 +5321,7 @@ export default {
       if (it.pluginId && it.ref && !it.stremioBase) {
         const list = await resolvePluginRef(it.pluginId, it.ref, it.title);
         const first = list.find(x => x.url);
-        if (first) startPlayback(first.url, `${it.title} (${first.label})`, { mime: first.mime, referer: refOf(first) });
+        if (first) startPlayback(first.url, `${it.title} (${first.label})`, { mime: first.mime, referer: refOf(first), subtitles: first.subtitles });
         return;
       }
       // 3. Esperar (máx. 15 s) a que la búsqueda en plugins o el extractor de
@@ -5125,7 +5395,7 @@ export default {
         setStatus("🧪 Ejecutando los servidores web en caja de arena (máx. 40 s)...", { priority: true });
         await Promise.race([extractAllEmbeds(it, { deep: true }), new Promise(r => setTimeout(r, 40000))]);
         const d = (state.directStreams || []).find(x => x.url);
-        if (d && state.selectedItem === it) startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime, referer: refOf(d) });
+        if (d && state.selectedItem === it) startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime, referer: refOf(d), subtitles: d.subtitles });
         else setStatus("No se pudo sacar el video de los servidores web", { priority: true });
       });
       document.getElementById("ncEmbedBtn").addEventListener("click", () => {
@@ -5206,6 +5476,7 @@ export default {
       // Quitar el handler ANTES de vaciar el src: si no, el evento "error" que
       // dispara un src vacío reintenta vía proxy y vuelve a abrir el player.
       playbackRun++; // cancela los intentos pendientes del reproductor
+      Subs.run++; Subs.clear();
       video.onerror = null;
       video.onloadeddata = null;
       if (state.hlsInstance) { state.hlsInstance.destroy(); state.hlsInstance = null; }
@@ -5232,7 +5503,7 @@ export default {
         const cur = directs.findIndex(x => x.url === state.activeVideoUrl);
         const nxt = directs[(cur + 1) % directs.length];
         playerUI.osd(`🔄 ${nxt.label}`);
-        startPlayback(nxt.url, `${state.selectedItem ? state.selectedItem.title : "Kino TV"} (${nxt.label})`, { mime: nxt.mime, referer: refOf(nxt) });
+        startPlayback(nxt.url, `${state.selectedItem ? state.selectedItem.title : "Kino TV"} (${nxt.label})`, { mime: nxt.mime, referer: refOf(nxt), subtitles: nxt.subtitles });
         return;
       }
       if (!state.activeSources.length) { setStatus("No hay más servidores en la lista"); return; }
@@ -5340,6 +5611,7 @@ export default {
         if (isEditingField(document.activeElement)) return;
         if (document.getElementById("playerOverlay").classList.contains("open")) {
           e.preventDefault();
+          if (Subs.isOpen()) { Subs.closePanel(); return; } // Back cierra primero el panel de subtítulos
           document.getElementById("closePlayerBtn").click();
           return;
         }
@@ -5383,6 +5655,8 @@ export default {
     // Navegación espacial
     // ---------------------------------------------------------------------
     function focusScope() {
+      const subs = document.getElementById("subsPanel");
+      if (subs && subs.classList.contains("open")) return subs; // solo las opciones de subtítulos
       return ["playerOverlay", "configOverlay", "detailOverlay"]
         .map(id => document.getElementById(id))
         .find(o => o.classList.contains("open")) || document;
