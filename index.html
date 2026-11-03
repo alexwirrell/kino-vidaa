@@ -1462,7 +1462,7 @@
       }
       const head = document.createElement("h3");
       head.style.cssText = "font-size:16px; margin-bottom:4px;";
-      head.textContent = "🌐 Servidores Embed (funcionan sin proxy)";
+      head.textContent = "🌐 Servidores web (su botón ▶ necesita puntero; la app intenta sacar el video)";
       sl.appendChild(head);
       state.activeSources.forEach((src, idx) => {
         const row = document.createElement("div");
@@ -2796,7 +2796,7 @@
         });
         row.querySelector("[data-play-proxy]").addEventListener("click", e => {
           e.stopPropagation();
-          startPlayback(proxiedPlaybackUrl(s.url), `${title} (${s.label || 'Stream'})`, { viaProxy: true, mime: s.mime });
+          startPlayback(s.url, `${title} (${s.label || 'Stream'})`, { viaProxy: true, mime: s.mime });
         });
         row.querySelector("[data-play-native]").addEventListener("click", e => {
           e.stopPropagation();
@@ -3018,8 +3018,7 @@
         }
         setStatus(state.directStreams.length ? `${state.directStreams.length} enlaces directos encontrados` : "Sin enlaces directos: usa los servidores web de abajo");
         if (opts.autoplay && !autoplayed && !state.directStreams.length && state.activeSources.length && !playerUI.isOpen()) {
-          state.currentSourceIndex = 0;
-          startPlaybackSource(state.activeSources[0], title);
+          showNoControllableVideo(item); // no abrir una página embed que el mando no puede manejar
         }
         return state.directStreams;
       });
@@ -3036,7 +3035,8 @@
     // URL de reproducción a través del proxy CORS (para CDNs que no envían
     // cabeceras CORS, que hls.js necesita, o que bloquean al WebView)
     function proxiedPlaybackUrl(url) {
-      const prefix = state.lastGoodProxy || state.customProxy || "https://api.codetabs.com/v1/proxy?quest=";
+      // El proxy propio primero (Cloudflare Worker de Diagnóstico: aguanta video)
+      const prefix = state.customProxy || state.lastGoodProxy || "https://api.codetabs.com/v1/proxy?quest=";
       return prefix + encodeURIComponent(url);
     }
 
@@ -3157,9 +3157,10 @@
     }
 
     function startEmbedPlayback(src, title) {
+      playbackRun++; // cancela los intentos pendientes de un video anterior
       state.activeVideoUrl = src.url;
       document.getElementById("nowPlayingTitle").textContent = `${title || "Reproduciendo"} — ${src.name}`;
-      document.getElementById("nowPlayingSub").textContent = "Servidor web: su botón ▶ solo se pulsa con puntero. Si no arranca solo: ⚡ Buscar directo o 🌐 Navegador TV · Back: Salir";
+      document.getElementById("nowPlayingSub").textContent = "Servidor web: su botón ▶ solo se pulsa con puntero. Si no arranca solo: ⚡ Buscar directo o 🌐 Navegador TV · ▼: ocultar barra · Back: Salir";
       playerUI.setMode("embed");
       document.getElementById("playerOverlay").classList.add("open");
       const video = document.getElementById("videoPlayer");
@@ -3204,13 +3205,36 @@
       }
     }
 
+    // hls.js con TODAS sus peticiones (lista, sub-listas y trozos .ts) por el
+    // proxy. Antes solo la lista pasaba por el proxy y los trozos seguían
+    // pidiéndose directo, así que los canales sin CORS o en http:// fallaban.
+    function makeProxyLoader() {
+      const Base = Hls.DefaultConfig.loader;
+      return class ProxyLoader extends Base {
+        load(context, config, callbacks) {
+          const original = context.url;
+          context.url = proxiedPlaybackUrl(original);
+          const onSuccess = callbacks.onSuccess;
+          const cb = Object.assign({}, callbacks, {
+            onSuccess: (response, stats, ctx, details) => {
+              // Las rutas relativas de la lista se resuelven contra la URL ORIGINAL
+              if (response) response.url = original;
+              if (ctx) ctx.url = original;
+              onSuccess(response, stats, ctx, details);
+            }
+          });
+          super.load(context, config, cb);
+        }
+      };
+    }
+
+    let playbackRun = 0;
     function startPlayback(url, title, opts = {}) {
       if (!url) { setStatus("No hay URL de stream disponible"); return; }
-      if (!opts.viaProxy) state.activeVideoUrl = url; // conserva la URL original para el pase a nativo
+      const run = ++playbackRun;
+      state.activeVideoUrl = url; // URL original (para el pase a nativo y "Siguiente")
       document.getElementById("nowPlayingTitle").textContent = title || "Reproduciendo";
-      document.getElementById("nowPlayingSub").textContent = opts.viaProxy
-        ? "Vía proxy · OK: Pausa/Play · ◀ ▶: 10 s · Back: Salir"
-        : "OK: Pausa/Play · ◀ ▶: 10 s · Amarillo: Nativo VIDAA · Back: Salir";
+      document.getElementById("nowPlayingSub").textContent = "OK: Pausa/Play · ◀ ▶: 10 s · ▼: ocultar barra · Back: Salir";
       playerUI.setMode("video");
       document.getElementById("playerOverlay").classList.add("open");
       const video = document.getElementById("videoPlayer");
@@ -3219,43 +3243,80 @@
       iframe.src = "about:blank";
       iframe.style.display = "none";
       video.style.display = "";
-      // Sin crossOrigin: <video> reproduce orígenes cruzados sin CORS; solo hls.js lo necesita
-      if (state.hlsInstance) { state.hlsInstance.destroy(); state.hlsInstance = null; }
 
+      // Cadena de intentos, del más rápido al más compatible:
+      //  hls      → hls.js directo (necesita CORS del servidor)
+      //  native   → reproductor del propio TV (no necesita CORS)
+      //  hlsproxy → hls.js con TODO pasando por el proxy (CORS + http:// en página https://)
+      //  proxy    → archivo completo por el proxy
       const isHls = /\.m3u8(\?|#|$)/i.test(url) || /mpegurl/i.test(opts.mime || "");
-      let retried = !!opts.viaProxy;
+      const hlsOk = !!(window.Hls && Hls.isSupported());
+      const mixed = location.protocol === "https:" && /^http:\/\//i.test(url); // el TV lo bloquearía
+      const nativeHls = !!video.canPlayType && /maybe|probably/.test(video.canPlayType("application/vnd.apple.mpegurl"));
+      let stages = [];
+      if (isHls) {
+        if (!mixed && hlsOk) stages.push("hls");
+        if (!mixed && nativeHls) stages.push("native");
+        stages.push(hlsOk ? "hlsproxy" : "proxy");
+        if (!hlsOk && !nativeHls && !mixed) stages.unshift("native"); // último recurso
+      } else {
+        if (!mixed) stages.push("native");
+        stages.push("proxy");
+      }
+      if (opts.viaProxy) stages = stages.filter(st => st === "hlsproxy" || st === "proxy");
+      stages = stages.filter((st, i) => stages.indexOf(st) === i);
+      if (mixed) diagLog("player", "Enlace http:// en página https://: se usa el proxy directamente");
 
-      const retryViaProxy = () => {
-        const err = video.error;
-        diagLog("player", `Error de video${err ? " (código " + err.code + ")" : ""} en ${String(url).slice(0, 80)}${retried ? "" : " → reintento vía proxy"}`);
-        if (retried) {
-          setStatus("No se pudo reproducir ni directo ni vía proxy — prueba 🔄 Siguiente o 🟡 Nativo VIDAA", { priority: true });
-          document.getElementById("nowPlayingSub").textContent = "✗ Este enlace no se pudo reproducir en el TV · 🔄 Siguiente para probar otro";
+      let stageIdx = -1;
+      let watchdog = null;
+      const cleanup = () => {
+        clearTimeout(watchdog);
+        video.onerror = null;
+        video.onloadeddata = null;
+        if (state.hlsInstance) { try { state.hlsInstance.destroy(); } catch (_) {} state.hlsInstance = null; }
+      };
+      const fail = (why) => {
+        if (run !== playbackRun) return;
+        diagLog("player", `✗ ${stages[stageIdx]}: ${why} · ${String(url).slice(0, 80)}`);
+        nextStage();
+      };
+      const nextStage = () => {
+        if (run !== playbackRun) return;
+        cleanup();
+        stageIdx++;
+        if (stageIdx >= stages.length) {
+          setStatus("No se pudo reproducir este enlace — prueba 🔄 Siguiente o 🟡 Nativo VIDAA", { priority: true });
+          document.getElementById("nowPlayingSub").textContent = "✗ Este enlace no se pudo reproducir en el TV · 🔄 Siguiente para probar otro · detalles en 🩺 Diagnóstico";
           playerUI.osd("✗ No se pudo reproducir este enlace");
           playerUI.show(false);
           playerUI.el("playerNextServerBtn").focus();
           return;
         }
-        retried = true;
-        setStatus("El servidor no respondió directo; reintentando vía proxy…");
-        startPlayback(proxiedPlaybackUrl(url), title, { viaProxy: true, mime: opts.mime });
+        const stage = stages[stageIdx];
+        if (stageIdx > 0) playerUI.osd(stage === "native" ? "🔁 Probando el reproductor del TV..." : "🔁 Probando vía proxy...");
+        diagLog("player", `▶ intento ${stageIdx + 1}/${stages.length}: ${stage}`);
+        try { video.pause(); video.removeAttribute("src"); video.load(); } catch (_) {}
+        // Si en 25 s no llega imagen, pasar al siguiente intento
+        watchdog = setTimeout(() => { if (video.readyState < 2) fail("sin imagen en 25 s"); }, 25000);
+        video.onloadeddata = () => { clearTimeout(watchdog); diagLog("player", `✓ reproduciendo (${stage})`); };
+        video.onerror = () => fail(`error de video${video.error ? " código " + video.error.code : ""}`);
+        if (stage === "hls" || stage === "hlsproxy") {
+          const cfg = { manifestLoadingTimeOut: 20000, fragLoadingTimeOut: 20000, levelLoadingTimeOut: 20000 };
+          if (stage === "hlsproxy") cfg.loader = makeProxyLoader();
+          const hls = new Hls(cfg);
+          state.hlsInstance = hls;
+          hls.on(Hls.Events.MANIFEST_PARSED, () => tryAutoplay(video));
+          hls.on(Hls.Events.ERROR, (_, data) => {
+            if (data && data.fatal) fail(`hls.js ${data.type || ""} ${data.details || ""}`.trim());
+          });
+          hls.loadSource(url);
+          hls.attachMedia(video);
+        } else {
+          video.src = stage === "proxy" ? proxiedPlaybackUrl(url) : url;
+          tryAutoplay(video);
+        }
       };
-
-      video.onerror = () => { retryViaProxy(); };
-
-      if (isHls && window.Hls && Hls.isSupported()) {
-        const hls = new Hls({ manifestLoadingTimeOut: 20000, fragLoadingTimeOut: 20000 });
-        hls.loadSource(url);
-        hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => tryAutoplay(video));
-        hls.on(Hls.Events.ERROR, (_, data) => {
-          if (data && data.fatal) retryViaProxy();
-        });
-        state.hlsInstance = hls;
-      } else {
-        video.src = url;
-        tryAutoplay(video);
-      }
+      nextStage();
       // Foco en Pausa/Play (antes en Cerrar: un OK de más cerraba el video)
       playerUI.show(true);
     }
@@ -3290,11 +3351,11 @@
         this.updateProgress();
         this.scheduleHide();
       },
-      hide() {
+      hide(force) {
         clearTimeout(this.hideTimer);
         if (!this.isOpen()) return;
-        // Con el video en pausa la barra se queda visible
-        if (!this.isEmbed() && this.video().paused && this.video().currentSrc) return;
+        // Con el video en pausa la barra se queda visible (salvo que se pida con ▼)
+        if (!force && !this.isEmbed() && this.video().paused && this.video().currentSrc) return;
         this.overlay().classList.add("hud-hidden");
       },
       scheduleHide() {
@@ -3412,7 +3473,15 @@
         if ((k === "Enter" || c === 13) && !playerUI.isEmbed()) { playerUI.togglePlay(); return true; }
         if (k === "ArrowLeft" && !playerUI.isEmbed()) { playerUI.seek(-10); return true; }
         if (k === "ArrowRight" && !playerUI.isEmbed()) { playerUI.seek(10); return true; }
+        if (k === "ArrowDown") return true; // ya está oculta
         playerUI.show(true); // cualquier otra tecla: mostrar la barra
+        return true;
+      }
+      // ▼ con la barra visible: ocultarla (antes no había forma de quitarla)
+      if (k === "ArrowDown") {
+        e.preventDefault();
+        playerUI.hide(true);
+        playerUI.osd("▲ o OK: mostrar la barra");
         return true;
       }
       playerUI.scheduleHide(); // actividad con la barra visible: reiniciar el temporizador
@@ -3469,14 +3538,43 @@
         if (state.selectedItem !== it || playerUI.isOpen()) return;
         if (playDirect()) return;
       }
-      // 4. Servidores web embed
+      // 4. Nada controlable con el mando. Antes se abría la página embed, cuyo ▶
+      //    no se puede pulsar con el control: ahora se explica y se ofrecen
+      //    opciones en vez de dejar un video atascado.
       if (state.activeSources.length) {
-        state.currentSourceIndex = 0;
-        startPlaybackSource(state.activeSources[0], it.title);
+        showNoControllableVideo(it);
         return;
       }
       findDirectStreams(it, { autoplay: true, season: state.selectedSeason, episode: state.selectedEpisode });
     });
+
+    function showNoControllableVideo(it) {
+      const box = document.getElementById("directStreamsList");
+      setStatus("No se encontró un video que se pueda controlar con el mando", { priority: true });
+      box.innerHTML = `
+        <div class="list-box" style="flex-direction:column; align-items:stretch; gap:10px; border-color:rgba(229,9,20,0.5);">
+          <strong>⚠️ No encontré un video que se controle con el mando</strong>
+          <div style="font-size:13px; color:var(--muted); line-height:1.6;">
+            Tus plugins no dieron enlace directo y los servidores web (abajo) tienen su propio botón ▶,
+            que solo se pulsa con puntero. Opciones:
+          </div>
+          <div class="btn-group">
+            <button class="action-btn small focusable" id="ncRetryBtn">🔄 Buscar otra vez en plugins</button>
+            <button class="action-btn blue small focusable" id="ncBrowserBtn">🌐 Abrir en Navegador TV (con puntero)</button>
+            <button class="action-btn secondary small focusable" id="ncEmbedBtn">Abrir servidor web aquí igualmente</button>
+          </div>
+        </div>`;
+      document.getElementById("ncRetryBtn").addEventListener("click", () => findDirectStreams(it, { autoplay: true }));
+      document.getElementById("ncBrowserBtn").addEventListener("click", () => {
+        const src = state.activeSources.find(x => x.type === "embed");
+        if (src) { window.open(src.url, "_blank"); setStatus("Abierto en el navegador del TV", { priority: true }); }
+      });
+      document.getElementById("ncEmbedBtn").addEventListener("click", () => {
+        state.currentSourceIndex = 0;
+        startPlaybackSource(state.activeSources[0], it.title);
+      });
+      focusAndReveal(document.getElementById("ncRetryBtn"));
+    }
 
     document.getElementById("searchAllPluginsBtn").addEventListener("click", () => {
       if (state.selectedItem) searchStreamsAcrossPlugins(state.selectedItem.title);
@@ -3539,7 +3637,9 @@
       const iframe = document.getElementById("webPlayerFrame");
       // Quitar el handler ANTES de vaciar el src: si no, el evento "error" que
       // dispara un src vacío reintenta vía proxy y vuelve a abrir el player.
+      playbackRun++; // cancela los intentos pendientes del reproductor
       video.onerror = null;
+      video.onloadeddata = null;
       if (state.hlsInstance) { state.hlsInstance.destroy(); state.hlsInstance = null; }
       video.pause();
       video.removeAttribute("src");
