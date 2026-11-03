@@ -742,7 +742,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r26-2026-11-05";
+    const BUILD_TAG = "r27-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -1975,6 +1975,21 @@
       };
     }
 
+    function hlsSummary(text) {
+      const lines = text.split(/\r?\n/);
+      const uris = lines.filter(l => l && l.charAt(0) !== "#");
+      const variants = (text.match(/#EXT-X-STREAM-INF/g) || []).length;
+      if (variants) {
+        const hosts = [...new Set(uris.map(u => (/^https?:\/\/([^/]+)/.exec(u) || [, "relativa"])[1]))].slice(0, 3);
+        return `lista maestra: ${variants} calidad(es) · ${hosts.join(", ")}`;
+      }
+      let total = 0, segs = 0;
+      text.replace(/#EXTINF:([\d.]+)/g, (_, d) => { total += Number(d) || 0; segs++; return ""; });
+      const hosts = [...new Set(uris.map(u => (/^https?:\/\/([^/]+)/.exec(u) || [, "relativa"])[1]))].slice(0, 3);
+      const fmt = s => s >= 60 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${Math.round(s)} s`;
+      return `lista de video: ${segs} tramos · ${fmt(total)}${text.includes("#EXT-X-ENDLIST") ? "" : " · en vivo"} · ${hosts.join(", ")}`;
+    }
+
     function createKinoEnv(pluginId, manifest) {
       const secrets = makeSecretBox(pluginId, manifest);
       return {
@@ -2002,6 +2017,11 @@
           const r = await smartFetch(url, o);
           let text = r.text || "";
           let truncated = !!r.truncated;
+          // Resumen de cada lista HLS que lee el plugin: así el Diagnóstico muestra si el servidor
+          // dio la película, solo anuncios o un clip corto (señuelo) antes de que el plugin la descarte.
+          if (r.ok && text.slice(0, 400).includes("#EXTM3U")) {
+            try { diagLog("red", "   ↳ " + hlsSummary(text)); } catch (_) {}
+          }
           if (o.stopAt) {
             const i = text.toLowerCase().indexOf(String(o.stopAt).toLowerCase());
             if (i >= 0) { truncated = truncated || i + o.stopAt.length < text.length; text = text.slice(0, i + o.stopAt.length); }
