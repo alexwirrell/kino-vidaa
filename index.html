@@ -308,6 +308,13 @@
       font-weight: 600;
       cursor: pointer;
     }
+    .ep-btn.active { border-color: var(--accent); background: rgba(229, 9, 20, 0.18); }
+    .season-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+    .season-btn {
+      background: var(--panel-alt); border: 2px solid var(--border); color: var(--text);
+      padding: 8px 14px; border-radius: 999px; font-size: 14px; font-weight: 700; cursor: pointer;
+    }
+    .season-btn.active { background: var(--accent, #7c5cff); border-color: transparent; color: #fff; }
     .streams-box { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
     .stream-badge {
       display: inline-block;
@@ -742,7 +749,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r28-2026-11-05";
+    const BUILD_TAG = "r29-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -2579,17 +2586,9 @@
         const m = JSON.parse(r.text).meta;
         if (!m || !Array.isArray(m.videos) || m.videos.length <= 1) return;
         if (m.description) document.getElementById("detailDesc").textContent = m.description;
-        const epSec = document.getElementById("episodesSection");
-        epSec.innerHTML = `<h3 style="font-size:16px; margin-bottom:8px;">Seleccionar Episodio (${m.videos.length})</h3><div class="episodes-grid" id="epGrid"></div>`;
-        const epGrid = document.getElementById("epGrid");
-        m.videos.slice(0, 120).forEach((v, idx) => {
-          const b = document.createElement("button");
-          b.className = "ep-btn focusable" + (idx === 0 ? " active" : "");
-          const sNum = v.season || 1, eNum = v.episode || v.number || (idx + 1);
-          b.textContent = `T${sNum}:E${eNum} · ${v.name || v.title || "Episodio " + eNum}`;
-          b.addEventListener("click", () => {
-            epGrid.querySelectorAll(".ep-btn").forEach(btn => btn.classList.remove("active"));
-            b.classList.add("active");
+        const norm = m.videos.map((v, idx) => ({ season: v.season === undefined ? 1 : v.season, number: v.episode || v.number || (idx + 1), title: v.name || v.title, raw: v }));
+        renderEpisodePicker(norm, "Seleccionar Episodio", ep => {
+            const sNum = Number(ep.season) || 0, eNum = Number(ep.number) || 1;
             state.selectedSeason = sNum;
             state.selectedEpisode = eNum;
             state.activeSources = getSourcesForTitle(imdb, item.title, true, sNum, eNum);
@@ -2599,8 +2598,7 @@
             document.getElementById("directStreamsList").innerHTML = "";
             state.extractSearch = { item, promise: extractAllEmbeds(item) };
             setStatus(`Servidores actualizados para T${sNum}:E${eNum}`);
-          });
-          epGrid.appendChild(b);
+            focusStreamMenu("streamsList");
         });
       } catch (_) {}
     }
@@ -4264,6 +4262,64 @@ async function handle(request) {
       }
     }
 
+    // Selector de episodios como en Kino: una fila de temporadas y, debajo, solo los capítulos
+    // de la temporada elegida (antes salían todos juntos y se cortaban en 120).
+    // eps: [{ season, number, title, raw }] · onPick(ep, boton)
+    function renderEpisodePicker(eps, heading, onPick) {
+      const sec = document.getElementById("episodesSection");
+      const bySeason = new Map();
+      eps.forEach(ep => {
+        const n = Number(ep.season);
+        const key = Number.isFinite(n) && ep.season !== null && ep.season !== "" ? n : 1;
+        if (!bySeason.has(key)) bySeason.set(key, []);
+        bySeason.get(key).push(ep);
+      });
+      // Los especiales (temporada 0) van al final
+      const seasons = Array.from(bySeason.keys()).sort((a, b) => (a === 0) - (b === 0) || a - b);
+      seasons.forEach(k => bySeason.get(k).sort((a, b) => (Number(a.number) || 0) - (Number(b.number) || 0)));
+      sec.innerHTML = `<h3 style="font-size:17px; margin-bottom:8px;">${heading} (${eps.length})</h3>` +
+        (seasons.length > 1 ? `<div class="season-tabs" id="seasonTabs"></div>` : "") +
+        `<div class="episodes-grid" id="epGrid"></div>`;
+      const tabs = document.getElementById("seasonTabs");
+      const grid = document.getElementById("epGrid");
+      let picked = null;
+      const show = season => {
+        if (tabs) tabs.querySelectorAll(".season-btn").forEach(b => b.classList.toggle("active", Number(b.dataset.season) === season));
+        grid.innerHTML = "";
+        grid.scrollTop = 0;
+        bySeason.get(season).slice(0, 600).forEach(ep => {
+          const b = document.createElement("button");
+          b.className = "ep-btn focusable" + (picked === ep ? " active" : "");
+          b.textContent = `E${ep.number || "?"} · ${ep.title || "Episodio " + (ep.number || "")}`;
+          b.addEventListener("click", () => {
+            picked = ep;
+            grid.querySelectorAll(".ep-btn").forEach(x => x.classList.remove("active"));
+            b.classList.add("active");
+            onPick(ep, b);
+          });
+          grid.appendChild(b);
+        });
+      };
+      if (tabs) seasons.forEach(season => {
+        const b = document.createElement("button");
+        b.className = "season-btn focusable";
+        b.dataset.season = season;
+        b.textContent = season === 0 ? `Especiales (${bySeason.get(0).length})` : `Temporada ${season}`;
+        b.addEventListener("click", () => show(season));
+        tabs.appendChild(b);
+      });
+      show(seasons[0]);
+    }
+    // Tras elegir un episodio, llevar el foco al menú de servidores (estaba debajo de todos los
+    // capítulos y había que bajar por toda la lista para llegar a él).
+    function focusStreamMenu(boxId) {
+      const box = document.getElementById(boxId);
+      if (!box) return;
+      const target = box.querySelector("[data-play-web], [data-open-lazy], .focusable");
+      if (target) { try { target.focus({ preventScroll: true }); } catch (_) { target.focus(); } }
+      (target || box).scrollIntoView({ block: "center" });
+    }
+
     async function openDetail(item) {
       state.selectedItem = item;
       const fallbackImg = "https://avatars.githubusercontent.com/u/332969319?s=200&v=4";
@@ -4328,20 +4384,16 @@ async function handle(request) {
             if (epRes.series.year) document.getElementById("detailMeta").textContent = `${epRes.series.year} · Fuente: ${inst.name}`;
           }
           if (eps.length) {
-            const epSec = document.getElementById("episodesSection");
-            epSec.innerHTML = `<h3 style="font-size:17px; margin-bottom:8px;">Capítulos / Archivos (${eps.length})</h3><div class="episodes-grid" id="epGrid"></div>`;
-            const epGrid = document.getElementById("epGrid");
-            eps.slice(0, 120).forEach(ep => {
-              const b = document.createElement("button");
-              b.className = "ep-btn focusable";
-              const epLabel = (ep.season ? `T${ep.season}:` : "") + `E${ep.number || ep.episode || 1} - ${ep.title || ep.name || "Capítulo"}`;
-              b.textContent = epLabel;
-              b.addEventListener("click", () => {
-                state.selectedSeason = Number(ep.season) || 1; // para buscar los subtítulos del episodio
-                state.selectedEpisode = Number(ep.number || ep.episode) || 1;
-                resolvePluginRef(inst.id, ep.ref || ep.id, `${item.title} ${epLabel}`);
-              });
-              epGrid.appendChild(b);
+            const norm = eps.map(ep => ({ season: ep.season, number: ep.number || ep.episode, title: ep.title || ep.name, raw: ep }));
+            renderEpisodePicker(norm, "Capítulos / Archivos", async ep => {
+              state.selectedSeason = Number(ep.season) || 1; // para buscar los subtítulos del episodio
+              state.selectedEpisode = Number(ep.number) || 1;
+              const epLabel = (ep.season ? `T${ep.season}:` : "") + `E${ep.number || 1} - ${ep.title || "Capítulo"}`;
+              const box = document.getElementById("directStreamsList");
+              box.innerHTML = `<div style='color:var(--muted); font-size:14px;'>⏳ Buscando servidores para ${epLabel}…</div>`;
+              box.scrollIntoView({ block: "center" });
+              const list = await resolvePluginRef(inst.id, ep.raw.ref || ep.raw.id, `${item.title} ${epLabel}`);
+              if (list && list.length && state.selectedItem === item && !playerUI.isOpen()) focusStreamMenu("directStreamsList");
             });
           }
         } catch (e) {
@@ -4362,16 +4414,10 @@ async function handle(request) {
             if (m) {
               if (m.description) document.getElementById("detailDesc").textContent = m.description;
               if (Array.isArray(m.videos) && m.videos.length > 1) {
-                const epSec = document.getElementById("episodesSection");
-                epSec.innerHTML = `<h3 style="font-size:17px; margin-bottom:8px;">Episodios (${m.videos.length})</h3><div class="episodes-grid" id="epGrid"></div>`;
-                const epGrid = document.getElementById("epGrid");
-                m.videos.slice(0, 100).forEach(v => {
-                  const b = document.createElement("button");
-                  b.className = "ep-btn focusable";
-                  const label = `T${v.season || 1}:E${v.episode || v.number || 1} · ${v.name || v.title || "Episodio"}`;
-                  b.textContent = label;
-                  b.addEventListener("click", () => searchStreamsAcrossPlugins(item.title, v.season, v.episode));
-                  epGrid.appendChild(b);
+                const norm = m.videos.map(v => ({ season: v.season, number: v.episode || v.number, title: v.name || v.title, raw: v }));
+                renderEpisodePicker(norm, "Episodios", ep => {
+                  searchStreamsAcrossPlugins(item.title, ep.raw.season, ep.raw.episode);
+                  document.getElementById("streamsList").scrollIntoView({ block: "center" });
                 });
               }
             }
