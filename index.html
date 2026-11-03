@@ -814,7 +814,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r34-2026-11-05";
+    const BUILD_TAG = "r35-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -2954,7 +2954,7 @@
       try {
         const r = await withTimeout(callPluginFn(inst, "resolve", ch.ref), 30000, inst.name);
         const streamUrl = r && (r.url || (Array.isArray(r.copies) && r.copies[0] && r.copies[0].url));
-        if (streamUrl) startPlayback(streamUrl, ch.name, { mime: r.mime, referer: refOf(r), live: true });
+        if (streamUrl) startPlayback(streamUrl, ch.name, { mime: r.mime, referer: refOf(r), live: true, drm: r.drm });
         else setStatus("No se pudo obtener el video del canal");
       } catch (e) {
         setStatus(`✗ ${ch.name}: ${(e && (e.userMessage || e.message)) || "no disponible"}`, { priority: true });
@@ -5153,6 +5153,7 @@ async function handle(request) {
       const video = document.getElementById("videoPlayer");
       const iframe = document.getElementById("webPlayerFrame");
       if (state.hlsInstance) { state.hlsInstance.destroy(); state.hlsInstance = null; }
+      destroyShaka();
       video.onerror = null;
       video.pause();
       video.removeAttribute("src");
@@ -5230,6 +5231,47 @@ async function handle(request) {
       return Object.keys(h).length ? h : "";
     }
 
+    // DASH (.mpd), con o sin DRM (Widevine / PlayReady), con Shaka Player. Se descarga solo la
+    // primera vez que llega un video DASH (p. ej. Caracol TV): ~650 KB.
+    const SHAKA_URL = "https://cdn.jsdelivr.net/npm/shaka-player@4.11.7/dist/shaka-player.compiled.js";
+    let shakaLoading = null;
+    function loadShaka() {
+      if (window.shaka && window.shaka.Player) return Promise.resolve(window.shaka);
+      if (!shakaLoading) shakaLoading = new Promise((res, rej) => {
+        const sc = document.createElement("script");
+        sc.src = SHAKA_URL;
+        sc.onload = () => (window.shaka && window.shaka.Player) ? res(window.shaka) : rej(new Error("el reproductor DASH no cargó"));
+        sc.onerror = () => { shakaLoading = null; rej(new Error("no se pudo descargar el reproductor DASH")); };
+        document.head.appendChild(sc);
+      });
+      return shakaLoading;
+    }
+    let shakaClosing = Promise.resolve();
+    function destroyShaka() {
+      if (state.shakaInstance) {
+        const pl = state.shakaInstance;
+        state.shakaInstance = null;
+        // destroy() es asíncrono: el siguiente intento espera a que suelte el <video>
+        shakaClosing = Promise.resolve().then(() => pl.destroy()).catch(() => {});
+      }
+      return shakaClosing;
+    }
+    // Error de Shaka en palabras (los códigos que importan en un TV)
+    function shakaWhy(e) {
+      const c = e && (e.code || (e.detail && e.detail.code));
+      const d = (e && (e.data || (e.detail && e.detail.data))) || [];
+      if (c === 6001 || c === 6002) return "el navegador del TV no admite este DRM (Widevine/PlayReady)";
+      if (c === 4032) return "el navegador del TV no admite el DRM o el formato de este video";
+      if (c === 6007) { const inner = d[0] && d[0].data; return `el servidor de licencias rechazó la petición${inner && inner[1] ? " (HTTP " + inner[1] + ")" : ""}`; }
+      if (c === 6006 || c === 6008 || c === 6010) return "la licencia DRM no se pudo aplicar";
+      if (c === 1001) return `el servidor respondió HTTP ${d[1] || "?"}${d[2] ? ": " + String(d[2]).slice(0, 80) : ""}`;
+      if (c === 1002) return "falla de red/CORS al pedir el video";
+      if (c === 1003) return "tiempo de espera agotado";
+      if (c === 4000 || c === 4001) return "el manifiesto DASH no es válido";
+      if (c === 3016 || c === 3014 || c === 3015) return "el TV no pudo decodificar el video";
+      return `Shaka ${c || ""} ${(e && e.message) || ""}`.trim();
+    }
+
     let playbackRun = 0;
     function startPlayback(url, title, opts = {}) {
       if (!url) { setStatus("No hay URL de stream disponible"); return; }
@@ -5260,7 +5302,13 @@ async function handle(request) {
       const mixed = location.protocol === "https:" && /^http:\/\//i.test(url); // el TV lo bloquearía
       const nativeHls = !!video.canPlayType && /maybe|probably/.test(video.canPlayType("application/vnd.apple.mpegurl"));
       let stages = [];
-      if (isHls) {
+      if (isDash) {
+        // DASH: directo desde el TV (su conexión, p. ej. colombiana) y por el proxy propio (que puede
+        // mandar User-Agent y Cookie, que el navegador no deja poner); el TV nativo al final
+        if (!mixed) stages.push("dash");
+        if (state.customProxy) stages.push("dashproxy");
+        stages.push("native");
+      } else if (isHls) {
         if (!mixed && hlsOk) stages.push("hls");
         if (!mixed && nativeHls) stages.push("native");
         stages.push(hlsOk ? "hlsproxy" : "proxy");
@@ -5275,7 +5323,7 @@ async function handle(request) {
       if (opts.viaProxy) stages = stages.filter(st => st === "hlsproxy" || st === "proxy");
       // Video que exige Referer (capturado de un servidor web) y hay proxy
       // propio: ir directo por el proxy, que sí puede enviarlo
-      if (opts.referer && state.customProxy) stages.sort((a, b) => (/proxy/.test(b) ? 1 : 0) - (/proxy/.test(a) ? 1 : 0));
+      if (opts.referer && state.customProxy && !isDash) stages.sort((a, b) => (/proxy/.test(b) ? 1 : 0) - (/proxy/.test(a) ? 1 : 0));
       stages = stages.filter((st, i) => stages.indexOf(st) === i);
       if (mixed) diagLog("player", "Enlace http:// en página https://: se usa el proxy directamente");
       diagLog("player", `▶ ${String(url).replace(/^https?:\/\//, "").slice(0, 70)} · cabeceras del servidor: ${!opts.referer ? "ninguna" : typeof opts.referer === "string" ? "Referer" : Object.keys(opts.referer).join(", ")}${state.customProxy ? "" : " · sin proxy propio"}`);
@@ -5287,6 +5335,7 @@ async function handle(request) {
         video.onerror = null;
         video.onloadeddata = null;
         if (state.hlsInstance) { try { state.hlsInstance.destroy(); } catch (_) {} state.hlsInstance = null; }
+        destroyShaka();
       };
       const fail = (why) => {
         if (run !== playbackRun) return;
@@ -5321,9 +5370,9 @@ async function handle(request) {
           try { video.pause(); } catch (_) {} // p. ej. no dejar sonando un video de relleno
           setStatus("No se pudo reproducir este enlace — prueba ⏭ Siguiente o 🟡 Nativo VIDAA", { priority: true });
           document.getElementById("nowPlayingSub").textContent = (isDash || hasDrm)
-            ? `✗ Este video es DASH${hasDrm ? " con DRM (Widevine)" : ""}: la app aún no tiene reproductor para ese formato · ⏭ Siguiente para probar otro`
+            ? `✗ Este video DASH${hasDrm ? " con DRM" : ""} no se pudo reproducir (motivo en 🩺 Diagnóstico) · ⏭ Siguiente para probar otro`
             : "✗ Este enlace no se pudo reproducir en el TV · ⏭ Siguiente para probar otro · detalles en 🩺 Diagnóstico";
-          if (isDash || hasDrm) diagLog("player", `ℹ️ formato DASH${hasDrm ? " + DRM " + ((listedStream && listedStream.drm && listedStream.drm.type) || "") : ""}: no hay reproductor DASH en la app; ${state.drmSupport ? "el TV " + (state.drmSupport.widevine ? "sí" : "no") + " admite Widevine" : "soporte DRM del TV desconocido"}`);
+          if (hasDrm && state.drmSupport && !state.drmSupport.widevine && !state.drmSupport.playready) diagLog("player", "ℹ️ este TV no admite DRM en el navegador: los videos protegidos (Caracol...) no se pueden ver aquí");
           playerUI.osd("✗ No se pudo reproducir este enlace");
           playerUI.show(false);
           playerUI.el("playerNextServerBtn").focus();
@@ -5352,7 +5401,53 @@ async function handle(request) {
           }
         };
         video.onerror = () => fail(`error de video${video.error ? " código " + video.error.code : ""}`);
-        if (stage === "hls" || stage === "hlsproxy") {
+        if (stage === "dash" || stage === "dashproxy") {
+          clearTimeout(watchdog); // descargar Shaka y pedir la licencia lleva más tiempo
+          watchdog = setTimeout(() => { if (video.readyState < 2) sfail("sin imagen en 40 s"); }, 40000);
+          const drm = opts.drm || (listedStream && listedStream.drm) || null;
+          const hdrs = !opts.referer ? {} : (typeof opts.referer === "string" ? { Referer: opts.referer } : opts.referer);
+          // Directo: el navegador no deja poner estas cabeceras (las pone el proxy propio)
+          const safe = h => { const o = {}; Object.keys(h || {}).forEach(k => { if (!/^(user-agent|cookie|referer|origin|host|content-length|connection|accept-encoding)$/i.test(k)) o[k] = String(h[k]); }); return o; };
+          const viaProxy = stage === "dashproxy";
+          let failed = false; // Shaka puede avisar el mismo error varias veces: un solo salto
+          const sfail = w => { if (failed || run !== playbackRun || stages[stageIdx] !== stage) return; failed = true; fail(w); };
+          loadShaka().then(async sh => {
+            await shakaClosing;
+            if (run !== playbackRun || stages[stageIdx] !== stage) return;
+            sh.polyfill.installAll();
+            if (!sh.Player.isBrowserSupported()) { sfail("este navegador no admite DASH (sin MSE)"); return; }
+            const player = new sh.Player();
+            state.shakaInstance = player;
+            const RT = sh.net.NetworkingEngine.RequestType;
+            const cfg = { streaming: { retryParameters: { maxAttempts: 2, timeout: 20000 } }, manifest: { retryParameters: { maxAttempts: 2, timeout: 20000 } } };
+            if (drm && drm.licenseUrl) {
+              const ks = /playready/i.test(drm.type || "") ? "com.microsoft.playready" : "com.widevine.alpha";
+              cfg.drm = { servers: { [ks]: drm.licenseUrl }, retryParameters: { maxAttempts: 2, timeout: 20000 } };
+              diagLog("player", `🔐 DRM ${drm.type || ks}: licencia en ${String(drm.licenseUrl).replace(/^https?:\/\//, "").slice(0, 50)}${state.drmSupport ? " · el TV " + (state.drmSupport.widevine ? "sí" : "NO") + " admite Widevine" : ""}`);
+            }
+            player.configure(cfg);
+            const ne = player.getNetworkingEngine();
+            ne.registerRequestFilter((type, req) => {
+              const extra = type === RT.LICENSE && drm ? Object.assign({}, hdrs, drm.licenseHeaders || {}) : hdrs;
+              if (viaProxy) req.uris = req.uris.map(u => proxyFor(state.customProxy, u, extra));
+              // Directo: solo la licencia lleva las cabeceras del plugin (su servidor las acepta desde el TV);
+              // en manifiesto y segmentos una cabecera rara obliga a un permiso CORS que el CDN puede negar
+              else if (type === RT.LICENSE) Object.assign(req.headers, safe(extra));
+            });
+            // Por el proxy, las direcciones relativas del manifiesto se resuelven contra el destino real
+            if (viaProxy) ne.registerResponseFilter((type, resp) => {
+              const m = /[?&]url=([^&]+)/.exec(resp.uri || "");
+              if (m) { try { resp.uri = decodeURIComponent(m[1]); } catch (_) {} }
+            });
+            player.addEventListener("error", ev => sfail(shakaWhy(ev.detail)));
+            try {
+              await player.attach(video);
+              await player.load(url);
+              if (run !== playbackRun) return;
+              tryAutoplay(video);
+            } catch (e) { sfail(shakaWhy(e)); }
+          }).catch(e => sfail(e.message || String(e)));
+        } else if (stage === "hls" || stage === "hlsproxy") {
           const cfg = { manifestLoadingTimeOut: 20000, fragLoadingTimeOut: 20000, levelLoadingTimeOut: 20000 };
           if (stage === "hlsproxy") cfg.loader = makeProxyLoader(opts.referer);
           const hls = new Hls(cfg);
@@ -6169,6 +6264,7 @@ async function handle(request) {
       video.onerror = null;
       video.onloadeddata = null;
       if (state.hlsInstance) { state.hlsInstance.destroy(); state.hlsInstance = null; }
+      destroyShaka();
       video.pause();
       video.removeAttribute("src");
       try { video.load(); } catch (_) {}
