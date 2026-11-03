@@ -712,7 +712,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r11-2026-11-03";
+    const BUILD_TAG = "r12-2026-11-04";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -3211,10 +3211,13 @@ export default {
 
     // URL de reproducción a través del proxy CORS (para CDNs que no envían
     // cabeceras CORS, que hls.js necesita, o que bloquean al WebView)
-    function proxiedPlaybackUrl(url, referer) {
+    // `extra`: el Referer (texto) o todas las cabeceras que pide el servidor del
+    // video ({ Referer, "User-Agent", Cookie... }); el proxy propio las envía
+    function proxiedPlaybackUrl(url, extra) {
       // El proxy propio primero (Cloudflare Worker de Diagnóstico: aguanta video)
       const prefix = state.customProxy || state.lastGoodProxy || "https://api.codetabs.com/v1/proxy?quest=";
-      return proxyFor(prefix, url, referer ? { Referer: referer } : null);
+      const hdrs = !extra ? null : (typeof extra === "string" ? { Referer: extra } : extra);
+      return proxyFor(prefix, url, hdrs);
     }
 
     // =========================================================================
@@ -3741,10 +3744,14 @@ export default {
     }
 
     // Referer que pide el servidor del video (de la captura o de las cabeceras del plugin)
+    // Cabeceras que exige el servidor del video: las que dio el plugin
+    // (Referer, User-Agent, Cookie...) y el Referer de la página capturada.
+    // Antes solo se reenviaba el Referer y servidores como vidplayz rechazaban el video.
     function refOf(x) {
       if (!x) return "";
-      const h = x.headers || {};
-      return x.referer || h.Referer || h.referer || "";
+      const h = Object.assign({}, (x.headers && typeof x.headers === "object") ? x.headers : {});
+      if (x.referer && !h.Referer && !h.referer) h.Referer = x.referer;
+      return Object.keys(h).length ? h : "";
     }
 
     let playbackRun = 0;
@@ -3788,6 +3795,7 @@ export default {
       if (opts.referer && state.customProxy) stages.sort((a, b) => (/proxy/.test(b) ? 1 : 0) - (/proxy/.test(a) ? 1 : 0));
       stages = stages.filter((st, i) => stages.indexOf(st) === i);
       if (mixed) diagLog("player", "Enlace http:// en página https://: se usa el proxy directamente");
+      diagLog("player", `▶ ${String(url).replace(/^https?:\/\//, "").slice(0, 70)} · cabeceras del servidor: ${!opts.referer ? "ninguna" : typeof opts.referer === "string" ? "Referer" : Object.keys(opts.referer).join(", ")}${state.customProxy ? "" : " · sin proxy propio"}`);
 
       let stageIdx = -1;
       let watchdog = null;
