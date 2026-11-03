@@ -688,6 +688,7 @@
       pluginConfigs: loadStore("kino_plugin_configs", {}),
       loadedModules: {}, // id -> { manifest, exports }
       homeRows: [], // se llena con la caché al iniciar (ver loadHomeCache)
+      pluginStatus: loadStore("kino_plugin_status", {}),
       liveLoading: false,
       liveGroup: "all",
       liveChannels: loadStore("kino_m3u_v2", [
@@ -712,7 +713,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r12-2026-11-04";
+    const BUILD_TAG = "r13-2026-11-04";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -1657,12 +1658,40 @@
       return out;
     }
 
+    function cinemetaActive() {
+      return state.installed.some(i => i.id === "cinemeta" && i.enabled !== false);
+    }
+
+    // Qué pasó con cada plugin la última vez (se ve en Tienda ▸ Instalados)
+    function setPluginStatus(inst, msg, ok) {
+      state.pluginStatus[inst.id] = { msg: String(msg).slice(0, 160), ok: !!ok, t: Date.now() };
+      saveStore("kino_plugin_status", state.pluginStatus);
+    }
+
+    // Filas del Inicio que el plugin entrega vacías con un `ref` (se cargan
+    // aparte con browse(ref)): antes se descartaban y el plugin "no salía"
+    async function fillLazyRows(inst, res, rows) {
+      const list = Array.isArray(res) ? res : (res && Array.isArray(res.rows) ? res.rows : []);
+      const lazy = list.filter(r => r && (!Array.isArray(r.items) || !r.items.length) && (r.ref || r.id)).slice(0, 6);
+      if (!lazy.length) return;
+      const mod = state.loadedModules[inst.id];
+      if (!mod || !mod.exports || typeof mod.exports.browse !== "function") return;
+      await runPool(lazy, 3, async r => {
+        try {
+          const page = await withTimeout(callPluginFn(inst, "browse", r.ref || r.id), 20000, inst.name);
+          const items = Array.isArray(page) ? page : (page && Array.isArray(page.items) ? page.items : []);
+          if (items.length) rows.push(...mapPluginHomeRows(inst, [{ title: r.title || r.name, items }]));
+        } catch (_) {}
+      });
+    }
+
     let homeRefreshRun = 0;
     async function refreshHomeCatalog() {
       // Si se instala/desinstala durante una recarga, la recarga vieja (con la
       // lista anterior) terminaba después y pisaba las filas nuevas.
       const run = ++homeRefreshRun;
-      const active = state.installed.filter(i => i.enabled !== false && (i.stremio || i.address));
+      // Cinemeta se carga por la vía rápida de arriba: no repetir sus filas como addon
+      const active = state.installed.filter(i => i.enabled !== false && (i.stremio || i.address) && i.id !== "cinemeta");
       const total = active.length + 1;
       let done = 0;
       setStatus(`Cargando Inicio... (0/${total})`);
@@ -1693,6 +1722,9 @@
       };
 
       const cinemetaTask = (async () => {
+        // Las filas de Cinemeta solo salen si el addon Cinemeta está instalado y
+        // activo (antes estaban fijas: seguían saliendo aunque se desinstalara)
+        if (!cinemetaActive()) { slots[0] = []; finished(); return; }
         try {
           const [cmMovies, cmSeries] = await withTimeout(
             Promise.all([fetchCinemetaCatalog("movie"), fetchCinemetaCatalog("series")]),
@@ -1710,12 +1742,23 @@
         try {
           if (inst.stremio) {
             slots[i + 1] = await withTimeout(fetchStremioAddonHome(inst), 30000, inst.name);
+            setPluginStatus(inst, slots[i + 1].length ? `✓ ${slots[i + 1].length} filas en Inicio` : "Sin filas de catálogo (addon de búsqueda, subtítulos o streams)", !!slots[i + 1].length);
           } else {
-            const res = await withTimeout(callPluginFn(inst, "home"), 30000, inst.name);
-            slots[i + 1] = mapPluginHomeRows(inst, res);
+            const mod = await withTimeout(loadGitHubPlugin(inst), 30000, inst.name);
+            if (!mod || !mod.exports || typeof mod.exports.home !== "function") {
+              slots[i + 1] = [];
+              setPluginStatus(inst, "No tiene Inicio: sirve para buscar o reproducir", true);
+            } else {
+              const res = await withTimeout(callPluginFn(inst, "home"), 30000, inst.name);
+              const rows = mapPluginHomeRows(inst, res);
+              await fillLazyRows(inst, res, rows);
+              slots[i + 1] = rows;
+              setPluginStatus(inst, rows.length ? `✓ ${rows.length} filas en Inicio` : "Su Inicio llegó vacío (¿necesita configuración o el sitio no respondió?)", !!rows.length);
+            }
           }
         } catch (err) {
           slots[i + 1] = null; // falló o tardó: se siguen mostrando sus filas anteriores
+          setPluginStatus(inst, `✗ ${(err && (err.userMessage || err.message)) || err}`, false);
           diagLog("error", `Inicio de ${inst.name} → ${(err && (err.userMessage || err.message)) || err}`);
         }
         finished();
@@ -2167,8 +2210,13 @@
       `;
       wrap.appendChild(filterRow);
 
-      // Filtrar lista de plugins
-      let list = state.storeEntries.filter(e => {
+      // Filtrar lista de plugins. Los instalados a mano (GitHub/URL) no están en
+      // el catálogo: se agregan para que también se vean en "Instalados".
+      const extraInstalled = state.installed
+        .filter(i => !state.storeEntries.some(e => e.id === i.id))
+        .map(i => ({ id: i.id, name: i.name, description: i.stremio ? "Addon instalado por URL" : "Plugin instalado desde GitHub",
+          address: i.address, stremio: i.stremio, categories: ["movies", "series"], recommended: false, author: i.address ? i.address.split("/")[0] : "Manual" }));
+      let list = state.storeEntries.concat(extraInstalled).filter(e => {
         const isAdult = Array.isArray(e.categories) && e.categories.includes("adult");
         if (isAdult && !state.showAdult && state.storeCategory !== "adult") return false;
         if (state.storeTab === "official" && !e.recommended) return false;
@@ -2207,6 +2255,7 @@
               </div>
             </div>
             <p class="plugin-desc" style="margin-top:10px;">${entry.description || "Sin descripción."}</p>
+            ${installed && state.pluginStatus[entry.id] ? `<div style="margin-top:8px; font-size:12px; font-weight:600; color:${state.pluginStatus[entry.id].ok ? "#4ade80" : "#f87171"};">${state.pluginStatus[entry.id].msg}</div>` : (installed ? `<div style="margin-top:8px; font-size:12px; color:var(--muted);">⏳ Aún sin cargar en Inicio</div>` : "")}
           </div>
           <div>
             <div class="plugin-tags" style="margin-bottom:10px;">
@@ -2381,7 +2430,9 @@
           // Vía sin proxy: Cinemeta (catálogo oficial Stremio) tiene CORS abierto
           // y responde enseguida — sus resultados aparecen primero, aunque todos
           // los plugins sigan peleando con los proxies.
-          const cinemetaTask = withTimeout(Promise.all([fetchCinemetaCatalog("movie", q), fetchCinemetaCatalog("series", q)]), 25000, "cinemeta")
+          const cinemetaTask = (cinemetaActive()
+            ? withTimeout(Promise.all([fetchCinemetaCatalog("movie", q), fetchCinemetaCatalog("series", q)]), 25000, "cinemeta")
+            : Promise.resolve([[], []]))
             .then(([cmMovies, cmSeries]) => {
               if (state.searchRun !== runToken) return;
               if (cmSeries.length) { withResults++; addGroup({ title: "Series (Cinemeta · servidores embed, sin proxy)", items: cmSeries.slice(0, 18) }, true); }
@@ -3057,7 +3108,8 @@ export default {
         findDirectStreams(item);
       }
       // Y sacar el video de las páginas embed (para no depender de su botón ▶)
-      if (state.activeSources.some(x => x.type === "embed")) state.extractSearch = { item, promise: extractAllEmbeds(item) };
+      // (Ya no se consultan los servidores web al abrir cada ficha: solo al
+      //  pulsar Reproducir. Hacerlo siempre los saturaba y pedían captcha.)
 
       const inst = state.installed.find(x => x.id === item.pluginId);
       // 1. Si viene de un plugin de GitHub, pedir details(ref) y episodes(ref)
@@ -3687,16 +3739,20 @@ export default {
       video.style.display = "none";
       iframe.style.display = "block";
       playerUI.embedActive = true;
-      iframe.src = withAutoplay(src.url);
+      // Sin parámetros añadidos: la URL tal cual (algunos servidores tomaban los
+      // parámetros extra como señal de bot y pedían captcha)
+      iframe.src = src.url;
       playerUI.show(true);
       // Mientras tanto, intentar sacar el video de esa página: si sale, se pasa
       // solo al reproductor propio (con Pausa/Play/⏩/⏪ desde el mando)
       const url = src.url;
       playerUI.osd("⏳ Buscando el video para controlarlo con el mando...");
-      extractFromEmbed(url, { deep: true, shouldStop: () => !playerUI.isOpen() || state.activeVideoUrl !== url }).then(media => {
+      // Solo lectura del HTML (una petición por el proxy): la ejecución en caja de
+      // arena ya no es automática, porque repetida parecía un bot y provocaba captchas
+      extractFromEmbed(url, { deep: false }).then(media => {
         if (!playerUI.isOpen() || !playerUI.isEmbed() || state.activeVideoUrl !== url) return;
         if (!media.length) {
-          playerUI.osd("Este servidor solo se reproduce con puntero: 🔄 Siguiente o 🌐 Navegador TV");
+          playerUI.osd("Este servidor necesita puntero: usa 🔄 Siguiente o ⚡ Buscar directo");
           return;
         }
         playerUI.osd("⚡ Video encontrado: ya se controla con el mando");
@@ -4068,13 +4124,12 @@ export default {
         if (state.selectedItem !== it || playerUI.isOpen()) return;
         if (playDirect()) return;
       }
-      // 4. Ejecutar las páginas de los servidores web en la caja de arena y
-      //    capturar el video que su reproductor pide al pulsar ▶
+      // 4. Leer el HTML de los servidores web (rápido, una petición cada uno)
       if (state.activeSources.some(x => x.type === "embed")) {
-        setStatus("⏳ Capturando el video de los servidores web (máx. 40 s)...", { priority: true });
-        const deep = extractAllEmbeds(it, { deep: true });
-        state.extractSearch = { item: it, promise: deep };
-        await Promise.race([deep, new Promise(r => setTimeout(r, 40000))]);
+        setStatus("⏳ Revisando los servidores web...", { priority: true });
+        const quick = extractAllEmbeds(it);
+        state.extractSearch = { item: it, promise: quick };
+        await Promise.race([quick, new Promise(r => setTimeout(r, 15000))]);
         if (state.selectedItem !== it || playerUI.isOpen()) return;
         if (playDirect()) return;
       }
@@ -4102,12 +4157,20 @@ export default {
             <button class="action-btn small focusable" id="ncRetryBtn">🔄 Buscar otra vez en plugins</button>
             <button class="action-btn blue small focusable" id="ncBrowserBtn">🌐 Abrir en Navegador TV (con puntero)</button>
             <button class="action-btn secondary small focusable" id="ncEmbedBtn">Abrir servidor web aquí igualmente</button>
+            <button class="action-btn secondary small focusable" id="ncDeepBtn">🧪 Intentar sacar el video (experimental)</button>
           </div>
         </div>`;
       document.getElementById("ncRetryBtn").addEventListener("click", () => findDirectStreams(it, { autoplay: true }));
       document.getElementById("ncBrowserBtn").addEventListener("click", () => {
         const src = state.activeSources.find(x => x.type === "embed");
         if (src) { window.open(src.url, "_blank"); setStatus("Abierto en el navegador del TV", { priority: true }); }
+      });
+      document.getElementById("ncDeepBtn").addEventListener("click", async () => {
+        setStatus("🧪 Ejecutando los servidores web en caja de arena (máx. 40 s)...", { priority: true });
+        await Promise.race([extractAllEmbeds(it, { deep: true }), new Promise(r => setTimeout(r, 40000))]);
+        const d = (state.directStreams || []).find(x => x.url);
+        if (d && state.selectedItem === it) startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime, referer: refOf(d) });
+        else setStatus("No se pudo sacar el video de los servidores web", { priority: true });
       });
       document.getElementById("ncEmbedBtn").addEventListener("click", () => {
         state.currentSourceIndex = 0;
@@ -4489,7 +4552,7 @@ export default {
         }))
         .catch(() => diagLog("red", `✗ El proxy propio no responde: ${state.customProxy}`));
     }
-    state.homeRows = loadHomeCache();
+    state.homeRows = loadHomeCache().filter(r => r.sourceId === "cinemeta-home" ? cinemetaActive() : isInstalled(r.sourceId));
     renderView();
     document.getElementById("navHome").focus();
     refreshHomeCatalog();
