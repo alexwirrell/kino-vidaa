@@ -713,7 +713,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r13-2026-11-04";
+    const BUILD_TAG = "r14-2026-11-04";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -1202,10 +1202,22 @@
           sha256: function(d) { return String(d); },
           md5: function(d) { return String(d); }
         },
+        // Sin llave se lanza un error (como Kino): antes devolvía "0 resultados" y
+        // plugins como YojaTV guardaban ese vacío y su Inicio salía en blanco
         tmdb: async function(path, params = {}) {
-          if (!state.tmdbKey) return { results: [] };
-          const q = new URLSearchParams(Object.assign({}, params, { api_key: state.tmdbKey }));
-          const r = await smartFetch(`https://api.themoviedb.org/3${path}?${q}`);
+          const key = state.tmdbKey || (state.pluginConfigs[pluginId] && state.pluginConfigs[pluginId].tmdbKey) || "";
+          if (!key) {
+            const e = new Error("Falta la llave de TMDB (Ajustes / Red)");
+            e.code = "unavailable";
+            e.userMessage = "Falta la llave de TMDB: ponla en ⚙️ Ajustes / Red";
+            throw e;
+          }
+          const clean = {};
+          Object.keys(params || {}).forEach(k => { if (params[k] !== undefined && params[k] !== null && params[k] !== "" && k !== "api_key") clean[k] = params[k]; });
+          const q = new URLSearchParams(Object.assign(clean, { api_key: key }));
+          const r = await smartFetch(`https://api.themoviedb.org/3${String(path).startsWith("/") ? path : "/" + path}?${q}`);
+          if (r.status === 429) { const e = new Error("TMDB: demasiadas peticiones"); e.code = "rate_limited"; throw e; }
+          if (!r.ok) { const e = new Error(`TMDB respondió HTTP ${r.status}`); e.code = r.status === 401 ? "unavailable" : "network"; throw e; }
           return JSON.parse(r.text);
         },
         sleep: function(ms) { return new Promise(res => setTimeout(res, Math.min(Number(ms) || 0, 5000))); },
@@ -1753,7 +1765,13 @@
               const rows = mapPluginHomeRows(inst, res);
               await fillLazyRows(inst, res, rows);
               slots[i + 1] = rows;
-              setPluginStatus(inst, rows.length ? `✓ ${rows.length} filas en Inicio` : "Su Inicio llegó vacío (¿necesita configuración o el sitio no respondió?)", !!rows.length);
+              // Plugin solo de canales: sin "home" en sus capacidades (TV Latam). YojaTV
+              // tiene canales Y catálogo: si su Inicio llega vacío, es un problema real
+              const caps = (mod.manifest && Array.isArray(mod.manifest.capabilities)) ? mod.manifest.capabilities : null;
+              const live = (typeof mod.exports.liveChannels === "function" || typeof mod.exports.channels === "function") && !(caps && caps.includes("search"));
+              setPluginStatus(inst, rows.length ? `✓ ${rows.length} filas en Inicio`
+                : live ? "📺 Plugin de canales: búscalos en En Vivo"
+                : "Su Inicio llegó vacío (¿necesita configuración, una llave de TMDB, o el sitio no respondió?)", !!rows.length || live);
             }
           }
         } catch (err) {
@@ -2671,8 +2689,12 @@
             <div id="proxyTestResults" style="font-size:13px; color:var(--muted); line-height:1.7;"></div>
           </div>
           <div class="list-box" style="flex-direction:column; align-items:stretch; gap:12px;">
-            <h3>2. Llave API de TMDB (Opcional, para el plugin oficial TMDB)</h3>
-            <input id="tmdbKeyInput" class="tv-input focusable" value="${state.tmdbKey}" placeholder="Pega tu API Key v3 de TMDB (opcional)" />
+            <h3>2. Llave API de TMDB (gratis · la usan YojaTV y TMDB para su Inicio)</h3>
+            <p style="color:var(--muted); font-size:13px; line-height:1.6;">Sin ella, el Inicio de YojaTV sale vacío. Desde el teléfono: crea una cuenta en <b>themoviedb.org</b> → Ajustes → <b>API</b> → pide una llave (uso personal) y copia la <b>"Clave de la API" (v3)</b>. Escríbela aquí con ⌨️ y pulsa 💾 Guardar.</p>
+            <div class="input-row" style="margin:0;">
+              <input id="tmdbKeyInput" class="tv-input focusable" value="${state.tmdbKey}" placeholder="Llave API v3 de TMDB" />
+              <button id="writeTmdbBtn" class="action-btn secondary focusable">⌨️ Escribir</button>
+            </div>
           </div>
           <div class="list-box">
             <div>
@@ -2735,6 +2757,9 @@
           }
           out.innerHTML += "<br>Si todos fallan, despliega un proxy propio (p. ej. un Cloudflare Worker) y pégalo arriba.";
         });
+        document.getElementById("writeTmdbBtn").addEventListener("click", () => {
+          if (promptForField(document.getElementById("tmdbKeyInput"))) document.getElementById("saveSettingsBtn").click();
+        });
         document.getElementById("writeProxyBtn").addEventListener("click", () => {
           const inp = document.getElementById("customProxyInput");
           if (promptForField(inp)) document.getElementById("saveSettingsBtn").click();
@@ -2747,6 +2772,9 @@
           state.tmdbKey = document.getElementById("tmdbKeyInput").value.trim();
           saveStore("kino_custom_proxy", state.customProxy || "off");
           saveStore("kino_tmdb_key", state.tmdbKey);
+          // Recargar los módulos para que los plugins vuelvan a pedir a TMDB con la llave
+          state.loadedModules = {};
+          refreshHomeCatalog();
           setStatus("Ajustes guardados correctamente");
         });
       } else if (state.view === "diag") {
@@ -4531,6 +4559,19 @@ export default {
     }
 
     // Inicialización
+    // Una sola vez: borrar las respuestas de TMDB que los plugins guardaron
+    // vacías mientras la app no tenía llave (si no, seguirían sin contenido)
+    try {
+      if (!localStorage.getItem("kino_tmdb_cache_purged_v1")) {
+        const del = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.startsWith("kino_pstore_") && /tmdb/i.test(k)) del.push(k);
+        }
+        del.forEach(k => localStorage.removeItem(k));
+        localStorage.setItem("kino_tmdb_cache_purged_v1", "1");
+      }
+    } catch (_) {}
     // También se puede configurar el proxy abriendo la app con ?proxy=dirección
     try {
       const qp = new URLSearchParams(location.search).get("proxy");
