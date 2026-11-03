@@ -742,7 +742,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r21-2026-11-05";
+    const BUILD_TAG = "r22-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -4939,6 +4939,7 @@ export default {
             setTimeout(() => { if (run === playbackRun) cycleServer(1, true); }, 900);
             return;
           }
+          try { video.pause(); } catch (_) {} // p. ej. no dejar sonando un video de relleno
           setStatus("No se pudo reproducir este enlace — prueba ⏭ Siguiente o 🟡 Nativo VIDAA", { priority: true });
           document.getElementById("nowPlayingSub").textContent = "✗ Este enlace no se pudo reproducir en el TV · ⏭ Siguiente para probar otro · detalles en 🩺 Diagnóstico";
           playerUI.osd("✗ No se pudo reproducir este enlace");
@@ -4952,7 +4953,21 @@ export default {
         try { video.pause(); video.removeAttribute("src"); video.load(); } catch (_) {}
         // Si en 25 s no llega imagen, pasar al siguiente intento
         watchdog = setTimeout(() => { if (video.readyState < 2) fail("sin imagen en 25 s"); }, 25000);
-        video.onloadeddata = () => { clearTimeout(watchdog); diagLog("player", `✓ reproduciendo (${stage})`); };
+        video.onloadeddata = () => {
+          clearTimeout(watchdog);
+          diagLog("player", `✓ reproduciendo (${stage})`);
+          // Video "de relleno": algunos sitios entregan un clip corto (p. ej. el león
+          // de la MGM, «m3tr0g0ldw1n.mp4», 13 s) en vez de la película cuando no los
+          // visita un navegador normal. Una película o episodio no dura < 60 s.
+          const d = video.duration;
+          const it = state.selectedItem;
+          if (!opts.live && it && !/live|music|trailer|clip/i.test(String(it.kind || "")) && isFinite(d) && d > 0 && d < 60) {
+            diagLog("player", `⚠️ el servidor dio un video de ${Math.round(d)} s (relleno, no la película): se prueba otra copia`);
+            playerUI.osd(`⚠️ Video de ${Math.round(d)} s: no es la película · probando otra copia…`);
+            stageIdx = stages.length - 1; // no repetir este enlace por otras vías
+            nextStage();
+          }
+        };
         video.onerror = () => fail(`error de video${video.error ? " código " + video.error.code : ""}`);
         if (stage === "hls" || stage === "hlsproxy") {
           const cfg = { manifestLoadingTimeOut: 20000, fragLoadingTimeOut: 20000, levelLoadingTimeOut: 20000 };
