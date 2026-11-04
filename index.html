@@ -829,7 +829,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r43-2026-11-05";
+    const BUILD_TAG = "r44-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -3940,6 +3940,16 @@
               <button id="writeTmdbBtn" class="action-btn secondary focusable">⌨️ Escribir</button>
             </div>
           </div>
+          <div class="list-box" style="flex-direction:column; align-items:stretch; gap:12px;">
+            <h3>3. Copia de seguridad de tus ajustes</h3>
+            <p style="color:var(--muted); font-size:13px; line-height:1.6;">Guarda tus plugins, tu proxy propio, la llave de TMDB y tus preferencias en un código. Si el TV borra los datos de la app, lo restauras escribiéndolo aquí. <b>Es privado:</b> lleva la dirección de tu worker y tu llave, no lo compartas.</p>
+            <div class="btn-group">
+              <button id="backupMakeBtn" class="action-btn secondary focusable">📤 Crear copia (código QR)</button>
+              <button id="backupRestoreBtn" class="action-btn secondary focusable">📥 Restaurar copia</button>
+            </div>
+            <input id="backupInput" class="tv-input focusable" placeholder="Código de la copia (empieza por KINO1:)" style="display:none;" />
+            <div id="backupOut" style="font-size:13px; color:var(--muted); line-height:1.6;"></div>
+          </div>
           <div class="list-box">
             <div>
               <strong>Mostrar categoría 18+ en la Tienda de Plugins</strong>
@@ -4003,6 +4013,12 @@
         });
         document.getElementById("writeTmdbBtn").addEventListener("click", () => {
           OSK.open(document.getElementById("tmdbKeyInput"), { onDone: () => document.getElementById("saveSettingsBtn").click() });
+        });
+        document.getElementById("backupMakeBtn").addEventListener("click", () => Backup.show(document.getElementById("backupOut")));
+        document.getElementById("backupRestoreBtn").addEventListener("click", () => {
+          const inp = document.getElementById("backupInput");
+          inp.value = "";
+          OSK.open(inp, { onDone: v => Backup.restore(v, document.getElementById("backupOut")) });
         });
         document.getElementById("writeProxyBtn").addEventListener("click", () => {
           OSK.open(document.getElementById("customProxyInput"), { onDone: () => document.getElementById("saveSettingsBtn").click() });
@@ -6961,6 +6977,94 @@ async function handle(request) {
     }
     // Ventana de escritura nativa del TV (window.prompt): funciona aunque el
     // teclado en pantalla no se abra sobre el campo
+    // =========================================================================
+    // COPIA DE SEGURIDAD: plugins, proxy propio, llave de TMDB y preferencias en un
+    // código (y su QR para guardarlo en el celular). No incluye los secretos de plugins.
+    // =========================================================================
+    const Backup = {
+      QR_URL: "https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js",
+      b64enc(str) { return btoa(unescape(encodeURIComponent(str))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); },
+      b64dec(str) { let t = str.replace(/-/g, "+").replace(/_/g, "/"); while (t.length % 4) t += "="; return decodeURIComponent(escape(atob(t))); },
+      make() {
+        // Lo más corto posible (se escribe con el control): sin nombres (salen de la tienda)
+        // ni campos vacíos; la dirección del plugin solo si no está en la tienda
+        const inStore = id => (state.storeEntries || []).find(e => e.id === id);
+        const data = { v: 1, p: state.installed.map(i => {
+          const e = inStore(i.id), row = [i.id];
+          if (!e || (e.address || "") !== (i.address || "") || (e.stremio || "") !== (i.stremio || "")) row.push(i.address || "", i.stremio || "");
+          if (i.enabled === false) { while (row.length < 3) row.push(""); row.push(0); }
+          return row.length === 1 ? i.id : row;
+        }) };
+        if (state.customProxy) data.w = String(state.customProxy).replace(/^https:\/\//, "").replace(/\/\?url=$/, "");
+        if (state.tmdbKey) data.t = state.tmdbKey;
+        if (state.pluginConfigs && Object.keys(state.pluginConfigs).some(k => Object.keys(state.pluginConfigs[k] || {}).length)) data.c = state.pluginConfigs;
+        const sp = loadStore("kino_sub_prefs", null), ap = loadStore("kino_track_prefs", null);
+        if (sp) data.s = sp;
+        if (ap) data.a = ap;
+        return "KINO1:" + this.b64enc(JSON.stringify(data));
+      },
+      loadQr() {
+        if (window.qrcode) return Promise.resolve(window.qrcode);
+        return new Promise((res, rej) => {
+          const sc = document.createElement("script");
+          sc.src = this.QR_URL;
+          sc.onload = () => window.qrcode ? res(window.qrcode) : rej(new Error("sin QR"));
+          sc.onerror = () => rej(new Error("no se pudo descargar el generador de QR"));
+          document.head.appendChild(sc);
+        });
+      },
+      async show(out) {
+        const code = this.make();
+        out.innerHTML = `<div style="margin-bottom:6px;">Escanea el QR con el celular y guarda el texto (por ejemplo en tus notas). Código (${code.length} caracteres):</div>
+          <div style="word-break:break-all; background:var(--panel-alt); padding:8px 10px; border-radius:8px; font-family:monospace; color:var(--text); max-height:120px; overflow:auto;"></div>
+          <div id="backupQr" style="margin-top:10px;"></div>`;
+        out.children[1].textContent = code;
+        try {
+          const qrcode = await this.loadQr();
+          const qr = qrcode(0, "L");
+          qr.addData(code);
+          qr.make();
+          out.querySelector("#backupQr").innerHTML = `<div style="display:inline-block; background:#fff; padding:10px; border-radius:10px;">${qr.createSvgTag(4, 0)}</div>`;
+        } catch (e) { out.querySelector("#backupQr").textContent = "⚠️ No se pudo dibujar el QR: copia el texto de arriba."; }
+        setStatus("📤 Copia creada: guárdala en el celular", { priority: true });
+      },
+      restore(raw, out) {
+        const txt = String(raw || "").trim().replace(/\s+/g, "");
+        let d;
+        try {
+          if (!/^KINO1:/i.test(txt)) throw new Error("el código debe empezar por KINO1:");
+          d = JSON.parse(this.b64dec(txt.slice(6)));
+          if (!d || d.v !== 1 || !Array.isArray(d.p)) throw new Error("código incompleto");
+        } catch (e) {
+          out.textContent = `✗ No se pudo leer la copia: ${e.message}. Revisa que esté completa.`;
+          setStatus("✗ Copia no válida", { priority: true });
+          return false;
+        }
+        d.p.forEach(row => {
+          const [id, address, stremio, on] = Array.isArray(row) ? row : [row];
+          if (!id) return;
+          const e = (state.storeEntries || []).find(x => x.id === id) || {};
+          const cur = state.installed.find(x => x.id === id);
+          if (cur) cur.enabled = on !== 0;
+          else state.installed.push({ id, name: e.name || id, address: address || e.address || null, stremio: stremio || e.stremio || null, enabled: on !== 0 });
+        });
+        saveStore("kino_installed_v2", state.installed);
+        if (d.w) { state.customProxy = normalizeProxyInput(d.w); saveStore("kino_custom_proxy", state.customProxy); }
+        if (d.t) { state.tmdbKey = d.t; saveStore("kino_tmdb_key", d.t); }
+        if (d.c && typeof d.c === "object") { state.pluginConfigs = Object.assign({}, state.pluginConfigs, d.c); saveStore("kino_plugin_configs", state.pluginConfigs); }
+        if (d.s) saveStore("kino_sub_prefs", d.s);
+        if (d.a) saveStore("kino_track_prefs", d.a);
+        state.loadedModules = {};
+        state.deadProxies = {};
+        updateBadges();
+        out.textContent = `✓ Restaurado: ${d.p.length} plugins${d.w ? ", tu proxy propio" : ""}${d.t ? ", la llave de TMDB" : ""}.`;
+        setStatus("✓ Copia restaurada · cargando tu Inicio...", { priority: true });
+        refreshHomeCatalog();
+        renderView();
+        return true;
+      }
+    };
+
     // =========================================================================
     // TECLADO EN PANTALLA: una cuadrícula de letras que se maneja con flechas y OK.
     // El teclado del TV a veces no aparece (y la ventana nativa no siempre buscaba);
