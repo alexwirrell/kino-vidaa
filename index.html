@@ -828,7 +828,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r41-2026-11-05";
+    const BUILD_TAG = "r42-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -2511,6 +2511,7 @@
         const secs = ((Date.now() - t0) / 1000).toFixed(1);
         const size = Array.isArray(res) ? res.length + " ítems" : (res && typeof res === "object" ? Object.keys(res).length + " campos" : typeof res === "string" ? `texto de ${res.length} caracteres` : String(res));
         diagLog("plugin", `${pluginEntry.id}.${fnName}(${argHint}) → ${size} (${secs}s)`);
+        PluginHealth.record(pluginEntry.id, fnName, Date.now() - t0, PluginHealth.outcomeOf(fnName, res));
         // 0 resultados: qué página recibió el plugin (¿verificación de Cloudflare, sitio cambiado?)
         if ((fnName === "home" || fnName === "search") && Array.isArray(res) && !res.length && lastPage[pluginEntry.id] && lastPage[pluginEntry.id].at >= t0) {
           const lp = lastPage[pluginEntry.id];
@@ -2520,6 +2521,8 @@
       } catch (e) {
         const secs = ((Date.now() - t0) / 1000).toFixed(1);
         diagLog("error", `${pluginEntry.id}.${fnName}(${argHint}) → ERROR ${e && e.code ? e.code + ": " : ""}${e && (e.userMessage || e.message)} (${secs}s)`);
+        // «No encontrado» es una respuesta normal (ese título no está); el resto cuenta como fallo
+        PluginHealth.record(pluginEntry.id, fnName, Date.now() - t0, e && e.code === "not_found" ? "empty" : "error", (e && (e.userMessage || e.message)) || "error");
         throw e;
       }
     }
@@ -2775,6 +2778,60 @@
 
     function cinemetaActive() {
       return state.installed.some(i => i.id === "cinemeta" && i.enabled !== false);
+    }
+
+    // =========================================================================
+    // SALUD DE LOS PLUGINS: resultados de sus últimas llamadas (Inicio, búsqueda,
+    // enlaces), cuánto tardan y si sus videos arrancan. Se ve en Tienda ▸ Instalados.
+    // =========================================================================
+    const PluginHealth = {
+      KEY: "kino_plugin_health_v1",
+      FNS: ["home", "search", "resolve", "episodes", "liveChannels", "browse"],
+      all() { const a = loadStore(this.KEY, {}); return a && typeof a === "object" && !Array.isArray(a) ? a : {}; },
+      record(id, fn, ms, outcome, msg) {
+        if (!this.FNS.includes(fn)) return;
+        const all = this.all();
+        const h = all[id] || { recent: [] };
+        h.recent = (h.recent || []).concat([{ f: fn, o: outcome, ms: Math.round(ms), t: Date.now() }]).slice(-12);
+        if (outcome === "ok") h.lastOk = Date.now();
+        if (outcome === "error") { h.lastErr = Date.now(); h.lastErrMsg = String(msg || "").slice(0, 120); }
+        all[id] = h;
+        saveStore(this.KEY, all);
+      },
+      outcomeOf(fn, res) {
+        if (fn === "resolve") return res && (res.url || (Array.isArray(res.copies) && res.copies.length) || (Array.isArray(res.alternatives) && res.alternatives.length)) ? "ok" : "empty";
+        const arr = Array.isArray(res) ? res : (res && (res.items || res.episodes || res.rows || res.channels));
+        if (Array.isArray(arr)) return arr.length ? "ok" : "empty";
+        return res ? "ok" : "empty";
+      },
+      // Veredicto: { level: ok|slow|bad|unknown, text }
+      verdict(id) {
+        const h = this.all()[id];
+        const st = StreamStats.all()["p:" + id];
+        const rec = (h && h.recent) || [];
+        const ok = rec.filter(r => r.o === "ok").length;
+        const okMs = rec.filter(r => r.o === "ok" && r.f !== "liveChannels");
+        const avg = okMs.length ? okMs.reduce((a, r) => a + r.ms, 0) / okMs.length : 0;
+        const vids = st ? `· videos: ${st.ok} arrancaron, ${st.fail + st.filler} fallaron${st.filler ? ` (${st.filler} de relleno)` : ""}` : "";
+        if (rec.length >= 3 && !ok) {
+          const err = h.lastErrMsg ? `: ${h.lastErrMsg}` : "";
+          return { level: "bad", text: `❌ Sin resultados en sus últimos ${rec.length} intentos${err} ${vids}` };
+        }
+        if (st && st.ok === 0 && st.fail + st.filler >= 3) return { level: "bad", text: `❌ Encuentra títulos pero sus videos no arrancan ${vids}` };
+        if (avg > 12000) return { level: "slow", text: `🐢 Funciona, pero tarda ${Math.round(avg / 1000)} s de media ${vids}` };
+        if (ok) return { level: "ok", text: `✅ Funciona · ${(avg / 1000).toFixed(1)} s de media ${vids}` };
+        return { level: "unknown", text: "⏳ Aún sin datos: úsalo un poco (Inicio, búsqueda, reproducir)" };
+      }
+    };
+    function setPluginEnabled(id, on) {
+      const inst = state.installed.find(x => x.id === id);
+      if (!inst) return;
+      inst.enabled = !!on;
+      saveStore("kino_installed_v2", state.installed);
+      updateBadges();
+      setStatus(on ? `▶ ${inst.name} activado` : `⏸ ${inst.name} en pausa: no se usa en Inicio, búsqueda ni Reproducir`, { priority: true });
+      refreshHomeCatalog();
+      renderView();
     }
 
     // Qué pasó con cada plugin la última vez (se ve en Tienda ▸ Instalados)
@@ -3378,6 +3435,32 @@
         return true;
       });
 
+      // 🩺 Resumen de salud: qué plugins no aportan y se pueden pausar de una vez
+      if (state.storeTab === "installed" && state.installed.length) {
+        const bad = state.installed.filter(i => i.enabled !== false && PluginHealth.verdict(i.id).level === "bad");
+        const slow = state.installed.filter(i => i.enabled !== false && PluginHealth.verdict(i.id).level === "slow");
+        const good = state.installed.filter(i => i.enabled !== false && PluginHealth.verdict(i.id).level === "ok");
+        const paused = state.installed.filter(i => i.enabled === false);
+        const box = document.createElement("div");
+        box.className = "list-box";
+        box.style.cssText = "flex-direction:column; align-items:stretch; gap:8px;";
+        box.innerHTML = `<h3 style="font-size:16px;">🩺 Salud de tus plugins</h3>
+          <div style="font-size:14px; line-height:1.7;">✅ Funcionan: ${good.length ? good.map(i => i.name).join(", ") : "—"}<br>
+          🐢 Lentos: ${slow.length ? slow.map(i => i.name).join(", ") : "—"}<br>
+          ❌ No aportan: ${bad.length ? bad.map(i => i.name).join(", ") : "—"}${paused.length ? `<br>⏸ En pausa: ${paused.map(i => i.name).join(", ")}` : ""}</div>
+          ${bad.length ? `<div style="font-size:13px; color:var(--muted);">Pausarlos hace que el Inicio, la búsqueda y Reproducir vayan más rápido. Puedes reactivarlos cuando quieras.</div>
+          <div><button class="action-btn small focusable" id="pauseBadBtn">⏸ Pausar los que no aportan (${bad.length})</button></div>` : ""}`;
+        wrap.appendChild(box);
+        const pb = box.querySelector("#pauseBadBtn");
+        if (pb) pb.addEventListener("click", () => {
+          bad.forEach(i => { i.enabled = false; });
+          saveStore("kino_installed_v2", state.installed);
+          setStatus(`⏸ En pausa: ${bad.map(i => i.name).join(", ")}`, { priority: true });
+          refreshHomeCatalog();
+          renderView();
+        });
+      }
+
       const grid = document.createElement("div");
       grid.className = "plugins-grid";
       const fallbackIcon = "https://avatars.githubusercontent.com/u/332969319?s=120&v=4";
@@ -3403,6 +3486,7 @@
             </div>
             <p class="plugin-desc" style="margin-top:10px;">${entry.description || "Sin descripción."}</p>
             ${installed && state.pluginStatus[entry.id] ? `<div style="margin-top:8px; font-size:12px; font-weight:600; color:${state.pluginStatus[entry.id].ok ? "#4ade80" : "#f87171"};">${state.pluginStatus[entry.id].msg}</div>` : (installed ? `<div style="margin-top:8px; font-size:12px; color:var(--muted);">⏳ Aún sin cargar en Inicio</div>` : "")}
+            ${installed ? (() => { const v = PluginHealth.verdict(entry.id); const col = { ok: "#4ade80", slow: "#fbbf24", bad: "#f87171", unknown: "var(--muted)" }[v.level]; const paused = (state.installed.find(x => x.id === entry.id) || {}).enabled === false; return `<div style="margin-top:6px; font-size:12px; color:${col};">🩺 ${paused ? "⏸ En pausa · " : ""}${v.text}</div>`; })() : ""}
           </div>
           <div>
             <div class="plugin-tags" style="margin-bottom:10px;">
@@ -3416,6 +3500,7 @@
               </button>
               ${entry.address ? `<button class="action-btn secondary small focusable" data-action="config">⚙️ Configurar</button>` : ""}
               ${installed ? `<button class="action-btn secondary small focusable" data-action="test">▶ Probar Home</button>` : ""}
+              ${installed ? `<button class="action-btn secondary small focusable" data-action="pause">${(state.installed.find(x => x.id === entry.id) || {}).enabled === false ? "▶ Activar" : "⏸ Pausar"}</button>` : ""}
             </div>
           </div>
         `;
@@ -3424,6 +3509,11 @@
         card.querySelector('[data-action="toggle"]').addEventListener("click", () => toggleInstallPlugin(entry));
         const cfgBtn = card.querySelector('[data-action="config"]');
         if (cfgBtn) cfgBtn.addEventListener("click", () => openPluginConfigModal(entry));
+        const pauseBtn = card.querySelector('[data-action="pause"]');
+        if (pauseBtn) pauseBtn.addEventListener("click", () => {
+          const inst = state.installed.find(x => x.id === entry.id);
+          setPluginEnabled(entry.id, inst && inst.enabled === false);
+        });
         const testBtn = card.querySelector('[data-action="test"]');
         if (testBtn) testBtn.addEventListener("click", async () => {
           state.view = "home";
