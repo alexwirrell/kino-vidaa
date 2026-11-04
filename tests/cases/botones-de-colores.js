@@ -1,0 +1,16 @@
+const H = require('../helpers');
+const { chromium } = require('playwright'); const fs = require('fs'); const path = require('path');
+(async () => { const b = await chromium.launch(); const ctx = await b.newContext({ viewport: { width: 1280, height: 720 } }); const p = await ctx.newPage(); const errs = []; p.on('pageerror', e => errs.push(e.message));
+  await ctx.route('**/*', r => r.request().url().startsWith('file:') ? r.continue() : r.abort());
+  await p.addInitScript(() => { if (!sessionStorage.getItem('x')) { sessionStorage.setItem('x', '1'); localStorage.setItem('kino_installed_v2', '[]'); } });
+  await p.goto(H.APP, { waitUntil: 'domcontentloaded' }); await p.waitForTimeout(600);
+  const press = c => p.evaluate(c => window.dispatchEvent(new KeyboardEvent('keydown', { keyCode: c, bubbles: true })), c).then(() => p.waitForTimeout(200));
+  await press(403); console.log('🔴 fuera → vista:', await p.evaluate(() => state.view), '· teclado abierto:', await p.evaluate(() => OSK.isOpen()));
+  await press(461); await press(406); console.log('🔵 fuera → vista:', await p.evaluate(() => state.view));
+  await press(405); console.log('🟡 fuera → vista:', await p.evaluate(() => state.view));
+  await press(404); console.log('🟢 sin historial →', await p.evaluate(() => statusPill.textContent));
+  await p.evaluate(c => { state.selectedItem = { id: 'm', title: 'Clip', kind: 'movie' }; startPlayback(c, 'Clip'); }, 'file://' + path.resolve('clip.webm'));
+  await p.waitForFunction(() => videoPlayer.currentTime > 0.2, null, { timeout: 10000 });
+  await press(403); console.log('🔴 en el reproductor → panel:', await p.evaluate(() => Subs.isOpen() && document.querySelector('#subsPanel h4').textContent));
+  await press(404); console.log('🟢 en el reproductor → panel:', await p.evaluate(() => Subs.isOpen() && document.querySelector('#subsPanel h4').textContent), '·', await p.evaluate(() => document.querySelector('#subsList').textContent.slice(0, 60)));
+  console.log('errors', errs); await b.close(); })();

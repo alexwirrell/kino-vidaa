@@ -1,0 +1,15 @@
+{
+  "name": "kino-vidaa-tests",
+  "private": true,
+  "description": "Pruebas de Kino TV — VIDAA OS Edition en un navegador real (Playwright), simulando el control remoto",
+  "scripts": {
+    "fixtures": "bash make-fixtures.sh",
+    "test": "node run.js"
+  },
+  "devDependencies": {
+    "hls.js": "1.5.15",
+    "playwright": "1.63.0",
+    "qrcode-generator": "1.4.4",
+    "shaka-player": "4.11.7"
+  }
+}

@@ -1,0 +1,26 @@
+const H = require('../helpers');
+const { chromium } = require('playwright'); const fs = require('fs'); const path = require('path');
+(async () => { const b = await chromium.launch(); const ctx = await b.newContext({ viewport: { width: 1280, height: 720 } }); const p = await ctx.newPage(); const errs = []; p.on('pageerror', e => errs.push(e.message));
+  await ctx.route('**/*', async route => { const u = route.request().url(); const cors = { 'access-control-allow-origin': '*' };
+    if (u.startsWith('file:')) return route.continue();
+    if (u.includes('hls.min.js')) return route.fulfill({ status: 200, contentType: 'text/javascript', body: fs.readFileSync(H.HLS_JS) });
+    if (u.startsWith('https://cdn.fake/m/')) { const f = u.split('/m/')[1].split('?')[0]; return route.fulfill({ status: 200, headers: Object.assign({ 'content-type': f.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t' }, cors), body: fs.readFileSync(path.join('mhls', f)) }); }
+    return route.abort(); });
+  await p.addInitScript(() => { if (!sessionStorage.getItem('x')) { sessionStorage.setItem('x', '1'); localStorage.setItem('kino_installed_v2', '[]'); } });
+  await p.goto(H.APP, { waitUntil: 'domcontentloaded' }); await p.waitForTimeout(800);
+  const start = async () => { await p.evaluate(() => { state.selectedItem = { id: 'm', title: 'Peli', kind: 'movie' }; startPlayback('https://cdn.fake/m/master.m3u8', 'Peli', { mime: 'application/x-mpegURL' }); });
+    await p.waitForFunction(() => state.hlsInstance && videoPlayer.currentTime > 0.3, null, { timeout: 30000 }); await p.waitForTimeout(500); };
+  await start();
+  await p.evaluate(() => playerTracksBtn.click()); await p.waitForTimeout(200);
+  const opts = () => p.evaluate(() => [...document.querySelectorAll('#subsList > *')].map(x => x.textContent.trim()).join(' | '));
+  console.log('1) panel:', await p.evaluate(() => document.querySelector('#subsPanel h4').textContent), '→', await opts(), '· foco:', await p.evaluate(() => document.activeElement.textContent));
+  await p.evaluate(() => [...document.querySelectorAll('#subsList .subs-opt')].find(x => /Castellano/.test(x.textContent)).click()); await p.waitForTimeout(400);
+  await p.evaluate(() => [...document.querySelectorAll('#subsList .subs-opt')].find(x => /160|90p/.test(x.textContent)).click()); await p.waitForTimeout(400);
+  console.log('2) tras elegir:', await opts(), '· hls audio:', await p.evaluate(() => state.hlsInstance.audioTracks[state.hlsInstance.audioTrack].name), '· nivel:', await p.evaluate(() => state.hlsInstance.levels[state.hlsInstance.currentLevel].height));
+  await p.keyboard.press('Escape'); await p.waitForTimeout(150);
+  console.log('3) Back cierra el panel:', !(await p.evaluate(() => Subs.isOpen())), '· reproductor sigue:', await p.evaluate(() => playerOverlay.classList.contains('open')), '· foco:', await p.evaluate(() => document.activeElement.id));
+  await p.evaluate(() => closePlayerBtn.click()); await start();
+  console.log('4) otro video → audio recordado:', await p.evaluate(() => state.hlsInstance.audioTracks[state.hlsInstance.audioTrack].name));
+  await p.evaluate(() => playerSubsBtn.click()); await p.waitForTimeout(150);
+  console.log('5) Subtítulos sigue con su panel:', await p.evaluate(() => document.querySelector('#subsPanel h4').textContent));
+  console.log('errors', errs); await b.close(); })();
