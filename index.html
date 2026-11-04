@@ -538,6 +538,7 @@
         <button class="action-btn small focusable embed-only" id="playerDirectBtn">⚡ Buscar directo</button>
         <button class="action-btn small focusable embed-only" id="playerBrowserBtn">🌐 Navegador TV</button>
         <button class="action-btn secondary small focusable video-only" id="playerSubsBtn">💬 Subtítulos</button>
+        <button class="action-btn secondary small focusable video-only" id="playerTracksBtn">🎚 Audio</button>
         <button class="action-btn small focusable embed-only" id="playerPointerBtn">🖱 Puntero</button>
         <button class="action-btn blue small focusable" id="playerPrevServerBtn">⏮ Anterior</button>
         <button class="action-btn blue small focusable" id="playerNextServerBtn">Siguiente ⏭</button>
@@ -828,7 +829,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r42-2026-11-05";
+    const BUILD_TAG = "r43-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -5671,7 +5672,7 @@ async function handle(request) {
       Watch.begin(opts);
       state.activeVideoUrl = url; // URL original (para el pase a nativo y "Siguiente")
       document.getElementById("nowPlayingTitle").textContent = title || "Reproduciendo";
-      document.getElementById("nowPlayingSub").textContent = "OK: Pausa/Play · ◀ ▶: 10 s · ▼: ocultar barra · Back: Salir";
+      document.getElementById("nowPlayingSub").textContent = "OK: Pausa/Play · ◀ ▶: 10 s · ▼: ocultar barra · 🔴 Subtítulos · 🟢 Audio · 🔵 Siguiente · Back: Salir";
       playerUI.setMode("video");
       document.getElementById("playerOverlay").classList.add("open");
       const video = document.getElementById("videoPlayer");
@@ -5873,6 +5874,7 @@ async function handle(request) {
               await player.attach(video);
               await player.load(url);
               if (run !== playbackRun) return;
+              Tracks.applyPref();
               tryAutoplay(video);
             } catch (e) { sfail(shakaWhy(e)); }
           }).catch(e => sfail(e.message || String(e)));
@@ -5882,6 +5884,7 @@ async function handle(request) {
           const hls = new Hls(cfg);
           state.hlsInstance = hls;
           hls.on(Hls.Events.MANIFEST_PARSED, () => tryAutoplay(video));
+          hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => Tracks.applyPref());
           hls.on(Hls.Events.ERROR, (_, data) => {
             if (data && data.fatal) fail(`hls.js ${data.type || ""} ${data.details || ""}`.trim());
           });
@@ -6222,7 +6225,7 @@ async function handle(request) {
         await Promise.all(jobs.map(j => j.catch(() => {})));
         if (run !== this.run) return;
         this.searching = false;
-        if (this.isOpen()) this.openPanel(); // refrescar la lista si estaba abierta
+        if (this.isOpen() && document.getElementById("subsPanel").dataset.mode !== "tracks") this.openPanel(); // refrescar la lista si estaba abierta
         diagLog("subtítulos", `${this.tracks.length} disponibles${ctx.imdbId ? " para " + ctx.imdbId : " (sin id de IMDb: pon la llave de TMDB para buscar más)"}`);
         this.autoPick(run);
       },
@@ -6318,6 +6321,8 @@ async function handle(request) {
       openPanel() {
         const panel = document.getElementById("subsPanel");
         const list = document.getElementById("subsList");
+        panel.dataset.mode = "subs";
+        panel.querySelector("h4").textContent = "💬 Subtítulos";
         list.innerHTML = "";
         const mk = (label, active, fn) => {
           const btn = document.createElement("button");
@@ -6348,12 +6353,106 @@ async function handle(request) {
         const panel = document.getElementById("subsPanel");
         if (!panel || !panel.classList.contains("open")) return;
         panel.classList.remove("open");
-        const b = document.getElementById("playerSubsBtn");
+        const b = document.getElementById(panel.dataset.mode === "tracks" ? "playerTracksBtn" : "playerSubsBtn");
         if (b && playerUI.isOpen()) b.focus();
         playerUI.scheduleHide();
       }
     };
     Subs.applySize();
+
+    // =========================================================================
+    // AUDIO Y CALIDAD: pistas de audio (Latino / Castellano / Original...) y
+    // calidades del video (hls.js y Shaka). El idioma elegido se recuerda.
+    // =========================================================================
+    const Tracks = {
+      PREF: "kino_track_prefs",
+      prefs() { return loadStore(this.PREF, {}) || {}; },
+      audioName(t) { return String(t.name || t.label || t.lang || t.language || "Audio").trim(); },
+      options() {
+        const out = { audio: [], quality: [] };
+        const h = state.hlsInstance, sp = state.shakaInstance;
+        if (h) {
+          (h.audioTracks || []).forEach((t, i) => out.audio.push({ label: this.audioName(t), active: h.audioTrack === i, pick: () => { h.audioTrack = i; this.remember(this.audioName(t)); } }));
+          const lv = h.levels || [];
+          if (lv.length > 1) {
+            // hls.js tarda en informar del cambio: se marca lo que elegiste
+            const chosen = h.__kinoLevel === undefined ? -1 : h.__kinoLevel;
+            out.quality.push({ label: "Automática", active: chosen === -1, pick: () => { h.currentLevel = -1; h.__kinoLevel = -1; } });
+            lv.map((l, i) => ({ l, i })).sort((a, b) => (b.l.height || 0) - (a.l.height || 0) || (b.l.bitrate || 0) - (a.l.bitrate || 0))
+              .forEach(({ l, i }) => out.quality.push({ label: l.height ? `${l.height}p` : `${Math.round((l.bitrate || 0) / 1000)} kbps`, active: chosen === i, pick: () => { h.currentLevel = i; h.__kinoLevel = i; } }));
+          }
+        } else if (sp) {
+          const cur = sp.getVariantTracks().find(t => t.active) || {};
+          const langs = [];
+          sp.getVariantTracks().forEach(t => { const k = (t.language || "und") + "|" + (t.label || ""); if (!langs.some(x => x.k === k)) langs.push({ k, t }); });
+          langs.forEach(({ t }) => out.audio.push({ label: t.label || t.language || "Audio", active: t.language === cur.language && (t.label || "") === (cur.label || ""),
+            pick: () => { sp.selectAudioLanguage(t.language); this.remember(t.label || t.language); } }));
+          const seen = new Set();
+          const vids = sp.getVariantTracks().filter(t => t.language === cur.language && t.height && !seen.has(t.height) && seen.add(t.height)).sort((a, b) => b.height - a.height);
+          if (vids.length > 1) {
+            const abr = sp.getConfiguration().abr.enabled;
+            out.quality.push({ label: "Automática", active: abr, pick: () => sp.configure({ abr: { enabled: true } }) });
+            vids.forEach(t => out.quality.push({ label: `${t.height}p`, active: !abr && cur.height === t.height, pick: () => { sp.configure({ abr: { enabled: false } }); sp.selectVariantTrack(t, true); } }));
+          }
+        }
+        return out;
+      },
+      remember(name) { const p = this.prefs(); p.audio = name; saveStore(this.PREF, p); },
+      // Al cargar un video con varias pistas: poner el idioma que elegiste la última vez
+      applyPref() {
+        const want = String(this.prefs().audio || "").toLowerCase();
+        if (!want) return;
+        const h = state.hlsInstance;
+        if (h && (h.audioTracks || []).length > 1) {
+          const i = h.audioTracks.findIndex(t => this.audioName(t).toLowerCase() === want) >= 0
+            ? h.audioTracks.findIndex(t => this.audioName(t).toLowerCase() === want)
+            : h.audioTracks.findIndex(t => this.audioName(t).toLowerCase().includes(want.split(" ")[0]));
+          if (i >= 0 && h.audioTrack !== i) { h.audioTrack = i; diagLog("player", `🔊 audio: ${this.audioName(h.audioTracks[i])} (tu preferencia)`); }
+        }
+        const sp = state.shakaInstance;
+        if (sp) {
+          const t = sp.getVariantTracks().find(x => String(x.label || x.language || "").toLowerCase() === want);
+          if (t) sp.selectAudioLanguage(t.language);
+        }
+      },
+      openPanel() {
+        const panel = document.getElementById("subsPanel");
+        const list = document.getElementById("subsList");
+        panel.dataset.mode = "tracks";
+        panel.querySelector("h4").textContent = "🎚 Audio y calidad";
+        list.innerHTML = "";
+        const o = this.options();
+        let first = null;
+        const head = txt => { const d = document.createElement("div"); d.className = "subs-note"; d.textContent = txt; list.appendChild(d); };
+        const mk = (label, active, fn) => {
+          const btn = document.createElement("button");
+          btn.className = "subs-opt focusable" + (active ? " active" : "");
+          btn.textContent = (active ? "✓ " : "") + label;
+          btn.addEventListener("click", () => { fn(); this.openPanel(); });
+          list.appendChild(btn);
+          if (!first) first = btn;
+        };
+        if (o.audio.length > 1) { head("🔊 Audio"); o.audio.forEach(a => mk(a.label, a.active, a.pick)); }
+        if (o.quality.length > 1) { head("📺 Calidad"); o.quality.forEach(q => mk(q.label, q.active, q.pick)); }
+        if (!first) {
+          head("Este video tiene una sola pista de audio y una sola calidad.");
+          const close = document.createElement("button");
+          close.className = "subs-opt focusable";
+          close.textContent = "Cerrar";
+          close.addEventListener("click", () => Subs.closePanel());
+          list.appendChild(close);
+          first = close;
+        }
+        panel.classList.add("open");
+        clearTimeout(playerUI.hideTimer);
+        playerUI.overlay().classList.remove("hud-hidden");
+        (list.querySelector(".subs-opt.active") || first).focus();
+      }
+    };
+    document.getElementById("playerTracksBtn").addEventListener("click", () => {
+      const panel = document.getElementById("subsPanel");
+      if (Subs.isOpen() && panel.dataset.mode === "tracks") Subs.closePanel(); else Tracks.openPanel();
+    });
     document.getElementById("playerSubsBtn").addEventListener("click", () => Subs.isOpen() ? Subs.closePanel() : Subs.openPanel());
 
     // =========================================================================
@@ -6804,6 +6903,38 @@ async function handle(request) {
       });
     });
 
+    // 🔴 🟢 🟡 🔵 En el reproductor: subtítulos, audio y calidad, reproductor nativo del TV,
+    // siguiente servidor. Fuera: buscar (con el teclado abierto), continuar lo último que
+    // viste, Inicio y Diagnóstico.
+    function colorKey(e) {
+      const c = e.keyCode, k = e.key;
+      const color = c === 403 || k === "ColorF0Red" ? "red" : c === 404 || k === "ColorF1Green" ? "green"
+        : c === 405 || k === "ColorF2Yellow" ? "yellow" : c === 406 || k === "ColorF3Blue" ? "blue" : null;
+      if (!color || OSK.isOpen()) return false;
+      e.preventDefault();
+      if (playerUI.isOpen()) {
+        if (color === "yellow") { if (state.activeVideoUrl) handoffToVidaaNativePlayer(state.activeVideoUrl, "Kino TV"); return true; }
+        if (color === "blue") { cycleServer(1); return true; }
+        if (playerUI.isEmbed()) { playerUI.osd("Servidor web: usa ⚡ Buscar directo para tener subtítulos y audio"); return true; }
+        playerUI.show(false);
+        if (color === "red") { Subs.isOpen() ? Subs.closePanel() : Subs.openPanel(); return true; }
+        if (color === "green") { Tracks.openPanel(); return true; }
+        return true;
+      }
+      ["detailOverlay", "configOverlay"].forEach(id => document.getElementById(id).classList.remove("open"));
+      if (color === "red") {
+        state.view = "search"; renderView();
+        const inp = document.getElementById("searchInput");
+        if (inp) OSK.open(inp);
+      } else if (color === "green") {
+        const last = Watch.list()[0];
+        if (last) resumeFromRow(last);
+        else setStatus("🟢 Aún no hay nada en «Continuar viendo»", { priority: true });
+      } else if (color === "yellow") { state.view = "home"; renderView(); }
+      else if (color === "blue") { state.view = "diag"; renderView(); }
+      return true;
+    }
+
     // Navegación espacial con el control remoto de VIDAA OS (Flechas + OK + Back + Amarillo)
     // ---------------------------------------------------------------------
     // Campos de texto en el TV: con solo enfocarlos, VIDAA abre el teclado en
@@ -7041,10 +7172,9 @@ async function handle(request) {
           return;
         }
       }
-      if (e.keyCode === 405 && state.activeVideoUrl) {
-        handoffToVidaaNativePlayer(state.activeVideoUrl, "Kino TV");
-        return;
-      }
+      // Botones de colores del control (códigos estándar de TV: 403 rojo, 404 verde,
+      // 405 amarillo, 406 azul)
+      if (colorKey(e)) return;
       if (handlePlayerKey(e)) return;
       // OK del control remoto: los navegadores solo "clican" con Enter en
       // <button>/<a>. Las tarjetas y filas de servidores son <div>, así que
