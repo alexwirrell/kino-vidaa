@@ -518,6 +518,7 @@
         </div>
       </div>
       <div class="btn-group">
+        <button class="action-btn small focusable video-only" id="playerRestartBtn" style="display:none;">⟲ Desde el inicio</button>
         <button class="action-btn small focusable video-only" id="playerRewBtn">⏪ 10 s</button>
         <button class="action-btn small focusable video-only" id="playerPlayPauseBtn">⏸ Pausa</button>
         <button class="action-btn small focusable video-only" id="playerFwdBtn">10 s ⏩</button>
@@ -814,7 +815,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r38-2026-11-05";
+    const BUILD_TAG = "r39-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -2978,7 +2979,7 @@
         `;
         const imgEl = card.querySelector("img");
         imgEl.addEventListener("error", () => { imgEl.src = fallbackImg; });
-        card.addEventListener("click", () => { state.lastFocusedCard = card; openDetail(item); });
+        card.addEventListener("click", () => { state.lastFocusedCard = card; if (item.__resume) resumeFromRow(item.__resume); else openDetail(item); });
         grid.appendChild(card);
       });
       return grid;
@@ -3501,6 +3502,20 @@
         document.getElementById("reloadHomeBtn").addEventListener("click", () => refreshHomeCatalog());
         document.getElementById("goStoreBtn").addEventListener("click", () => { state.view = "plugins"; renderView(); });
 
+        // ▶ Continuar viendo (lo último que viste, por dónde ibas)
+        const cont = Watch.list();
+        if (cont.length) {
+          const rowDiv = document.createElement("div");
+          rowDiv.className = "row-section";
+          rowDiv.innerHTML = `<div class="row-header"><div class="row-title">▶ Continuar viendo <span class="row-source-tag">${cont.length}</span></div></div>`;
+          const cards = cont.map(e => Object.assign({}, e.item, {
+            year: undefined,
+            source: (e.ep ? `T${e.ep.season || 1}:E${e.ep.number}${e.next ? " · siguiente" : ""}` : "Película") + (e.t ? ` · ${fmtTime(e.t)} de ${fmtTime(e.d)}` : ""),
+            __resume: e
+          }));
+          rowDiv.appendChild(renderCardGrid(cards, true));
+          viewContent.appendChild(rowDiv);
+        }
         if (!state.homeRows.length) {
           const empty = document.createElement("div");
           empty.className = "list-box";
@@ -4397,20 +4412,45 @@ async function handle(request) {
       const tabs = document.getElementById("seasonTabs");
       const grid = document.getElementById("epGrid");
       let picked = null;
+      const owner = state.selectedItem;
+      const flat = seasons.filter(k => k !== 0).concat(seasons.includes(0) ? [0] : []).reduce((a, k) => a.concat(bySeason.get(k)), []);
+      const pickEp = ep => {
+        const sk = bySeason.has(Number(ep.season)) ? Number(ep.season) : seasons[0];
+        if (!grid.querySelector(".ep-btn") || Number(grid.dataset.season) !== sk) show(sk);
+        picked = ep;
+        grid.querySelectorAll(".ep-btn").forEach(x => x.classList.toggle("active", x._ep === ep));
+        state.episodeContext = ep;
+        return Promise.resolve(onPick(ep, grid.querySelector(".ep-btn.active")));
+      };
+      state.episodePicker = {
+        item: owner,
+        find: (season, number) => flat.find(e => (Number(e.season) || 0) === Number(season) && (Number(e.number) || 0) === Number(number)) || null,
+        next: cur => {
+          const i = flat.findIndex(e => (Number(e.season) || 0) === Number(cur.season) && (Number(e.number) || 0) === Number(cur.number));
+          const n = i >= 0 ? flat[i + 1] : null;
+          return n && (Number(n.season) || 0) !== 0 ? n : null; // de la última temporada no se salta a especiales
+        },
+        // Elegir el episodio y reproducirlo sin pasar por el menú de servidores
+        play: async ep => {
+          await pickEp(ep);
+          if (state.selectedItem !== owner || playerUI.isOpen()) return;
+          const d = (state.directStreams || []).find(x => x.url && !x.failed);
+          const epName = `${owner.title} T${ep.season || 1}:E${ep.number || 1}`;
+          if (d) startPlayback(d.url, `${epName} (${d.label})`, { mime: d.mime, referer: refOf(d), subtitles: d.subtitles });
+          else document.getElementById("playDirectBtn").click();
+        }
+      };
       const show = season => {
         if (tabs) tabs.querySelectorAll(".season-btn").forEach(b => b.classList.toggle("active", Number(b.dataset.season) === season));
         grid.innerHTML = "";
         grid.scrollTop = 0;
+        grid.dataset.season = season;
         bySeason.get(season).slice(0, 600).forEach(ep => {
           const b = document.createElement("button");
           b.className = "ep-btn focusable" + (picked === ep ? " active" : "");
           b.textContent = `E${ep.number || "?"} · ${ep.title || "Episodio " + (ep.number || "")}`;
-          b.addEventListener("click", () => {
-            picked = ep;
-            grid.querySelectorAll(".ep-btn").forEach(x => x.classList.remove("active"));
-            b.classList.add("active");
-            onPick(ep, b);
-          });
+          b._ep = ep;
+          b.addEventListener("click", () => pickEp(ep));
           grid.appendChild(b);
         });
       };
@@ -4436,6 +4476,8 @@ async function handle(request) {
 
     async function openDetail(item) {
       state.selectedItem = item;
+      state.episodePicker = null;
+      state.episodeContext = null;
       const fallbackImg = "https://avatars.githubusercontent.com/u/332969319?s=200&v=4";
       document.getElementById("detailPoster").src = item.poster || fallbackImg;
       document.getElementById("detailTitle").textContent = item.title;
@@ -5256,6 +5298,129 @@ async function handle(request) {
       return Object.keys(h).length ? h : "";
     }
 
+    // =========================================================================
+    // CONTINUAR VIENDO: se guarda por dónde vas en cada película o serie, se reanuda
+    // al volver y, al terminar un episodio, se pasa al siguiente con cuenta atrás.
+    // =========================================================================
+    const Watch = {
+      KEY: "kino_progress_v1",
+      ctx: null, nextTimer: null, pendingNext: null, lastSave: 0,
+      itemKey(it) { return [it.pluginId || it.stremioBase || it.source || "x", it.ref || it.imdbId || it.id || it.title].join("|"); },
+      slim(it) {
+        const o = {};
+        ["id", "title", "poster", "year", "kind", "source", "pluginId", "ref", "imdbId", "stremioBase", "stremioType", "rawId", "video"]
+          .forEach(k => { if (it[k] !== undefined && it[k] !== null && typeof it[k] !== "object") o[k] = it[k]; });
+        return o;
+      },
+      all() { const a = loadStore(this.KEY, {}); return a && typeof a === "object" && !Array.isArray(a) ? a : {}; },
+      list() { return Object.values(this.all()).filter(e => e && e.item && e.item.title).sort((a, b) => b.at - a.at).slice(0, 20); },
+      remove(key) { const all = this.all(); delete all[key]; saveStore(this.KEY, all); },
+      begin(opts) {
+        this.cancelNext();
+        const btn = document.getElementById("playerRestartBtn");
+        if (btn) btn.style.display = "none";
+        const it = state.selectedItem;
+        if (opts.live || !it || /live|music|trailer|clip/i.test(String(it.kind || ""))) { this.ctx = null; return; }
+        const ep = state.episodeContext && state.episodePicker && state.episodePicker.item === it ? state.episodeContext : null;
+        this.ctx = { key: this.itemKey(it), item: this.slim(it), resumed: false,
+          ep: ep ? { season: Number(ep.season) || 0, number: Number(ep.number) || 0, title: ep.title || "" } : null };
+      },
+      resumePoint() {
+        const c = this.ctx;
+        if (!c) return 0;
+        const e = this.all()[c.key];
+        if (!e || !(e.t > 30) || !(e.d - e.t > 90)) return 0;
+        if (c.ep || e.ep) { if (!c.ep || !e.ep || c.ep.season !== e.ep.season || c.ep.number !== e.ep.number) return 0; }
+        return e.t;
+      },
+      save(video, force) {
+        const c = this.ctx;
+        if (!c || !video || !playerUI.isOpen() || playerUI.isEmbed()) return;
+        const d = video.duration, t = video.currentTime;
+        if (!isFinite(d) || d < 120 || !(t > 5)) return; // relleno o sin duración (en vivo)
+        if (!force && Date.now() - this.lastSave < 5000) return;
+        this.lastSave = Date.now();
+        const all = this.all();
+        if (d - t < 90 || t / d > 0.95) {
+          // Terminado: la película sale de la fila; la serie queda apuntando al siguiente episodio
+          const nxt = c.ep && state.episodePicker ? state.episodePicker.next(c.ep) : null;
+          if (nxt) all[c.key] = { item: c.item, ep: { season: Number(nxt.season) || 0, number: Number(nxt.number) || 0, title: nxt.title || "" }, t: 0, d: 0, at: Date.now(), next: true };
+          else delete all[c.key];
+        } else all[c.key] = { item: c.item, ep: c.ep, t: Math.floor(t), d: Math.floor(d), at: Date.now() };
+        Object.keys(all).sort((a, b) => all[b].at - all[a].at).slice(40).forEach(k => delete all[k]);
+        saveStore(this.KEY, all);
+      },
+      // El video arrancó (no es relleno): ir a donde se quedó
+      onStarted(video) {
+        const c = this.ctx;
+        if (!c || c.resumed) return;
+        c.resumed = true;
+        const t = this.resumePoint();
+        if (!t) return;
+        try { video.currentTime = t; } catch (_) { return; }
+        diagLog("player", `⟲ continúa donde lo dejaste: ${fmtTime(t)}`);
+        playerUI.osd(`⟲ Continuando desde ${fmtTime(t)} · «Desde el inicio» para empezar de cero`, 4000);
+        const btn = document.getElementById("playerRestartBtn");
+        if (btn) btn.style.display = "";
+      },
+      onEnded(video) {
+        this.save(video, true);
+        const c = this.ctx, picker = state.episodePicker;
+        const nxt = c && c.ep && picker && picker.item === state.selectedItem ? picker.next(c.ep) : null;
+        if (!nxt) return;
+        let left = 10;
+        this.pendingNext = nxt;
+        const tick = () => {
+          if (!playerUI.isOpen() || this.pendingNext !== nxt) return;
+          if (left <= 0) { this.playNext(); return; }
+          playerUI.show(false);
+          playerUI.osd(`⏭ Siguiente: T${nxt.season || 1}:E${nxt.number} ${nxt.title || ""} · en ${left} s · OK: ahora · Back: cancelar`, 1600);
+          left--;
+          this.nextTimer = setTimeout(tick, 1000);
+        };
+        diagLog("player", `⏭ episodio terminado: sigue T${nxt.season || 1}:E${nxt.number}`);
+        tick();
+      },
+      cancelNext() { clearTimeout(this.nextTimer); this.nextTimer = null; this.pendingNext = null; },
+      async playNext() {
+        const ep = this.pendingNext, picker = state.episodePicker;
+        this.cancelNext();
+        if (!ep || !picker) return;
+        document.getElementById("closePlayerBtn").click();
+        await picker.play(ep);
+      }
+    };
+    function fmtTime(sec) {
+      sec = Math.max(0, Math.floor(sec || 0));
+      const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s2 = sec % 60;
+      return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s2).padStart(2, "0");
+    }
+    // Abrir desde «Continuar viendo»: la ficha y, sin más pasos, el episodio o la película
+    async function resumeFromRow(entry) {
+      await openDetail(Object.assign({}, entry.item));
+      if (!entry.ep) { document.getElementById("playDirectBtn").click(); return; }
+      const it = state.selectedItem, t0 = Date.now();
+      while (!(state.episodePicker && state.episodePicker.item === it) && Date.now() - t0 < 25000) {
+        await new Promise(r => setTimeout(r, 300));
+        if (state.selectedItem !== it) return;
+      }
+      const p = state.episodePicker;
+      const ep = p && p.item === it ? p.find(entry.ep.season, entry.ep.number) : null;
+      if (!ep) { setStatus(`No se encontró T${entry.ep.season}:E${entry.ep.number} en la lista de episodios: elígelo a mano`, { priority: true }); return; }
+      p.play(ep);
+    }
+    (() => {
+      const v = document.getElementById("videoPlayer");
+      v.addEventListener("timeupdate", () => Watch.save(v));
+      v.addEventListener("pause", () => Watch.save(v, true));
+      v.addEventListener("ended", () => Watch.onEnded(v));
+      document.getElementById("playerRestartBtn").addEventListener("click", () => {
+        try { v.currentTime = 0; v.play(); } catch (_) {}
+        document.getElementById("playerRestartBtn").style.display = "none";
+        playerUI.defaultButton().focus();
+      });
+    })();
+
     // DASH (.mpd), con o sin DRM (Widevine / PlayReady), con Shaka Player. Se descarga solo la
     // primera vez que llega un video DASH (p. ej. Caracol TV): ~650 KB.
     const SHAKA_URL = "https://cdn.jsdelivr.net/npm/shaka-player@4.11.7/dist/shaka-player.compiled.js";
@@ -5302,6 +5467,7 @@ async function handle(request) {
       if (!url) { setStatus("No hay URL de stream disponible"); return; }
       const run = ++playbackRun;
       Pointer.close(true);
+      Watch.begin(opts);
       state.activeVideoUrl = url; // URL original (para el pase a nativo y "Siguiente")
       document.getElementById("nowPlayingTitle").textContent = title || "Reproduciendo";
       document.getElementById("nowPlayingSub").textContent = "OK: Pausa/Play · ◀ ▶: 10 s · ▼: ocultar barra · Back: Salir";
@@ -5423,7 +5589,9 @@ async function handle(request) {
             badMedia.add(String(url).split(/[?#]/)[0]); // otra copia que dé este mismo clip se salta sin probarla
             stageIdx = stages.length - 1; // no repetir este enlace por otras vías
             nextStage();
+            return;
           }
+          Watch.onStarted(video);
         };
         video.onerror = () => fail(`error de video${video.error ? " código " + video.error.code : ""}`);
         if (stage === "dash" || stage === "dashproxy") {
@@ -5543,12 +5711,12 @@ async function handle(request) {
         this.overlay().classList.remove("hud-hidden");
         this.el("playerOsd").classList.remove("show");
       },
-      osd(msg) {
+      osd(msg, ms) {
         const o = this.el("playerOsd");
         o.textContent = msg;
         o.classList.add("show");
         clearTimeout(this.osdTimer);
-        this.osdTimer = setTimeout(() => o.classList.remove("show"), 1400);
+        this.osdTimer = setTimeout(() => o.classList.remove("show"), ms || 1400);
       },
       togglePlay(forcePlay) {
         if (this.isEmbed()) { this.osd("Servidor web: usa ⚡ Buscar directo para controlar el video"); return; }
@@ -5627,6 +5795,7 @@ async function handle(request) {
     function handlePlayerKey(e) {
       if (!playerUI.isOpen()) return false;
       if (Pointer.key(e)) return true; // modo puntero: flechas mueven el cursor, OK hace clic
+      if (Watch.pendingNext && (e.key === "Enter" || e.keyCode === 13)) { e.preventDefault(); Watch.playNext(); return true; }
       const k = e.key, c = e.keyCode;
       const media =
         (k === "MediaPlayPause" || c === 10252 || c === 179 || c === 463) ? "toggle" :
@@ -6283,6 +6452,8 @@ async function handle(request) {
       const iframe = document.getElementById("webPlayerFrame");
       // Quitar el handler ANTES de vaciar el src: si no, el evento "error" que
       // dispara un src vacío reintenta vía proxy y vuelve a abrir el player.
+      Watch.save(video, true);
+      Watch.cancelNext();
       playbackRun++; // cancela los intentos pendientes del reproductor
       Subs.run++; Subs.clear();
       Pointer.close(true);
