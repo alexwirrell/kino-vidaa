@@ -309,6 +309,19 @@
       cursor: pointer;
     }
     .ep-btn.active { border-color: var(--accent); background: rgba(229, 9, 20, 0.18); }
+    #oskOverlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72); display: none; z-index: 9000; align-items: flex-end; justify-content: center; }
+    #oskOverlay.open { display: flex; }
+    .osk { background: var(--panel, #141824); border: 1px solid var(--border, #2d344a); border-radius: 18px 18px 0 0; padding: 18px 22px 22px; width: min(1100px, 100%); box-sizing: border-box; }
+    .osk-label { color: var(--muted); font-size: 14px; margin-bottom: 6px; }
+    .osk-text { background: var(--panel-alt); border: 2px solid var(--accent); border-radius: 10px; padding: 12px 14px; font-size: 22px; min-height: 30px; word-break: break-all; color: var(--text); }
+    .osk-sugg { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .osk-sugg:empty { display: none; }
+    .osk-sugg button { background: rgba(229, 9, 20, 0.15); border: 2px solid var(--border); color: var(--text); border-radius: 999px; padding: 7px 14px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .osk-grid { display: grid; grid-template-columns: repeat(10, 1fr); gap: 6px; margin-top: 12px; }
+    .osk-key { background: var(--panel-alt); color: var(--text); border: 2px solid var(--border); border-radius: 8px; font-size: 19px; font-weight: 700; padding: 9px 0; cursor: pointer; }
+    .osk-key.s2 { grid-column: span 2; } .osk-key.s3 { grid-column: span 3; }
+    .osk-key.ok { background: var(--accent); border-color: transparent; color: #fff; }
+    .osk-key.on { border-color: var(--accent); }
     .season-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
     .season-btn {
       background: var(--panel-alt); border: 2px solid var(--border); color: var(--text);
@@ -815,7 +828,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r39-2026-11-05";
+    const BUILD_TAG = "r40-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -3898,11 +3911,10 @@
           out.innerHTML += "<br>Si todos fallan, despliega un proxy propio (p. ej. un Cloudflare Worker) y pégalo arriba.";
         });
         document.getElementById("writeTmdbBtn").addEventListener("click", () => {
-          if (promptForField(document.getElementById("tmdbKeyInput"))) document.getElementById("saveSettingsBtn").click();
+          OSK.open(document.getElementById("tmdbKeyInput"), { onDone: () => document.getElementById("saveSettingsBtn").click() });
         });
         document.getElementById("writeProxyBtn").addEventListener("click", () => {
-          const inp = document.getElementById("customProxyInput");
-          if (promptForField(inp)) document.getElementById("saveSettingsBtn").click();
+          OSK.open(document.getElementById("customProxyInput"), { onDone: () => document.getElementById("saveSettingsBtn").click() });
         });
         document.getElementById("saveSettingsBtn").addEventListener("click", () => {
           state.customProxy = normalizeProxyInput(document.getElementById("customProxyInput").value);
@@ -6570,6 +6582,146 @@ async function handle(request) {
     }
     // Ventana de escritura nativa del TV (window.prompt): funciona aunque el
     // teclado en pantalla no se abra sobre el campo
+    // =========================================================================
+    // TECLADO EN PANTALLA: una cuadrícula de letras que se maneja con flechas y OK.
+    // El teclado del TV a veces no aparece (y la ventana nativa no siempre buscaba);
+    // este funciona siempre igual. «⌨ TV» vuelve al teclado del televisor.
+    // =========================================================================
+    const OSK = {
+      el: null, field: null, text: "", caps: false, onDone: null, suggTimer: null, suggRun: 0,
+      ROWS: ["1234567890", "qwertyuiop", "asdfghjklñ", "zxcvbnm,.-", "áéíóúü&='!", ":/_@?#()+*"],
+      isOpen() { return !!(this.el && this.el.classList.contains("open")); },
+      build() {
+        if (this.el) return;
+        const o = document.createElement("div");
+        o.id = "oskOverlay";
+        o.innerHTML = `<div class="osk" role="dialog" aria-label="Teclado">
+          <div class="osk-label" id="oskLabel"></div>
+          <div class="osk-text" id="oskText"></div>
+          <div class="osk-sugg" id="oskSugg"></div>
+          <div class="osk-grid" id="oskGrid"></div></div>`;
+        document.body.appendChild(o);
+        this.el = o;
+        const grid = o.querySelector("#oskGrid");
+        const key = (label, act, cls) => {
+          const b = document.createElement("button");
+          b.className = "osk-key focusable" + (cls ? " " + cls : "");
+          b.textContent = label;
+          b.dataset.ch = act.length === 1 ? act : "";
+          b.addEventListener("click", () => this.press(act));
+          grid.appendChild(b);
+          return b;
+        };
+        this.ROWS.forEach(r => [...r].forEach(ch => key(ch, ch)));
+        this.capsBtn = key("⇧ Mayús", "caps", "s2");
+        key("␣ Espacio", " ", "s3");
+        key("⌫", "back");
+        key("Borrar", "clear");
+        key("⌨ TV", "native");
+        key("✓ Listo", "done", "s2 ok");
+      },
+      open(field, opts = {}) {
+        this.build();
+        this.field = field;
+        this.onDone = opts.onDone || null;
+        this.text = field.value || "";
+        this.caps = false;
+        this.el.querySelector("#oskLabel").textContent = field.getAttribute("placeholder") || "Escribe";
+        this.el.querySelector("#oskSugg").innerHTML = "";
+        this.el.classList.add("open");
+        this.render();
+        const start = [...this.el.querySelectorAll(".osk-key")].find(b => b.dataset.ch === "q");
+        if (start) start.focus();
+        this.suggest();
+      },
+      close(focusField) {
+        if (!this.el) return;
+        this.el.classList.remove("open");
+        clearTimeout(this.suggTimer);
+        this.suggRun++;
+        if (focusField && this.field) { try { this.field.focus(); } catch (_) {} }
+      },
+      render() {
+        const shown = this.field && this.field.type === "password" ? "•".repeat(this.text.length) : this.text;
+        this.el.querySelector("#oskText").textContent = shown + "▏";
+        this.el.querySelectorAll(".osk-key").forEach(b => { if (b.dataset.ch && /[a-zñáéíóúü]/.test(b.dataset.ch)) b.textContent = this.caps ? b.dataset.ch.toUpperCase() : b.dataset.ch; });
+        if (this.capsBtn) this.capsBtn.classList.toggle("on", this.caps);
+      },
+      press(act) {
+        if (act === "caps") this.caps = !this.caps;
+        else if (act === "back") this.text = this.text.slice(0, -1);
+        else if (act === "clear") this.text = "";
+        else if (act === "done") return this.done();
+        else if (act === "native") return this.native();
+        else this.text += this.caps ? act.toUpperCase() : act;
+        this.render();
+        if (act !== "caps") this.suggest();
+      },
+      done(text) {
+        const f = this.field;
+        if (typeof text === "string") this.text = text;
+        this.close(true);
+        if (!f) return;
+        f.value = this.text.trim() === "" ? "" : this.text;
+        f.dispatchEvent(new Event("input", { bubbles: true }));
+        f.dispatchEvent(new Event("change", { bubbles: true }));
+        f.dispatchEvent(new Event("kino-submit"));
+        if (this.onDone) this.onDone(f.value);
+        else if (f.id !== "searchInput") setStatus("✓ Texto escrito. Pulsa 💾 Guardar si hace falta", { priority: true });
+      },
+      // El teclado propio del TV (y, con un 2.º OK, su ventana de escritura)
+      native() {
+        const f = this.field;
+        this.close(false);
+        if (!f) return;
+        unlockField(f);
+        f.focus();
+        try { f.click(); } catch (_) {}
+        try { const n = f.value.length; f.setSelectionRange(n, n); } catch (_) {}
+        setStatus("✏️ Teclado del TV: escribe y pulsa OK · ¿No sale? Pulsa OK otra vez", { priority: true });
+      },
+      // Sugerencias de títulos (TMDB) mientras se escribe en el buscador
+      suggest() {
+        const box = this.el.querySelector("#oskSugg");
+        clearTimeout(this.suggTimer);
+        const q = this.text.trim();
+        if (!this.field || this.field.id !== "searchInput" || !state.tmdbKey || q.length < 2) { box.innerHTML = ""; return; }
+        const run = ++this.suggRun;
+        this.suggTimer = setTimeout(async () => {
+          try {
+            const qs = new URLSearchParams({ api_key: state.tmdbKey, language: "es-MX", query: q, include_adult: "false" });
+            const r = await smartFetch(`https://api.themoviedb.org/3/search/multi?${qs}`, { timeoutMs: 6000, noPublicProxy: true });
+            if (run !== this.suggRun || !this.isOpen() || !r.ok) return;
+            const seen = new Set();
+            const list = (JSON.parse(r.text).results || [])
+              .filter(x => x.media_type === "movie" || x.media_type === "tv")
+              .map(x => ({ t: x.title || x.name, y: String(x.release_date || x.first_air_date || "").slice(0, 4) }))
+              .filter(x => x.t && !seen.has(x.t.toLowerCase()) && seen.add(x.t.toLowerCase()))
+              .slice(0, 6);
+            box.innerHTML = "";
+            list.forEach(x => {
+              const b = document.createElement("button");
+              b.className = "focusable";
+              b.textContent = x.y ? `${x.t} (${x.y})` : x.t;
+              b.addEventListener("click", () => this.done(x.t));
+              box.appendChild(b);
+            });
+          } catch (_) {}
+        }, 450);
+      }
+    };
+    // Teclas con el teclado abierto: Back cancela, ⌫ borra, números y letras de un teclado real
+    // escriben; flechas y OK siguen al manejador general (mueven el foco y pulsan la tecla)
+    window.addEventListener("keydown", e => {
+      if (!OSK.isOpen()) return;
+      const c = e.keyCode, k = e.key;
+      if (k === "Escape" || c === 461 || k === "GoBack" || ((k === "Backspace" || c === 8) && !OSK.text)) {
+        e.preventDefault(); e.stopImmediatePropagation(); OSK.close(true); return;
+      }
+      if (k === "Backspace" || c === 8) { e.preventDefault(); e.stopImmediatePropagation(); OSK.press("back"); return; }
+      if (k && k.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); e.stopImmediatePropagation(); OSK.text += k; OSK.render(); OSK.suggest(); return; }
+    }, true);
+
     function promptForField(el) {
       const label = el.getAttribute("placeholder") || "Escribe el texto";
       let v = null;
@@ -6603,13 +6755,7 @@ async function handle(request) {
         if (isEnter) {
           e.preventDefault();
           e.stopImmediatePropagation();
-          el.blur();
-          unlockField(el);
-          el.focus();
-          // Muchos TV solo abren su teclado con un "clic" sobre el campo
-          try { el.click(); } catch (_) {}
-          try { const n = el.value.length; el.setSelectionRange(n, n); } catch (_) {}
-          setStatus("✏️ Escribe y pulsa OK para terminar · ¿No sale el teclado? Pulsa OK otra vez", { priority: true });
+          OSK.open(el); // teclado en pantalla (desde él, «⌨ TV» abre el del televisor)
         }
         return; // flechas y Back siguen al manejador general
       }
@@ -6678,6 +6824,8 @@ async function handle(request) {
     function focusScope() {
       const subs = document.getElementById("subsPanel");
       if (subs && subs.classList.contains("open")) return subs; // solo las opciones de subtítulos
+      const osk = document.getElementById("oskOverlay");
+      if (osk && osk.classList.contains("open")) return osk; // solo el teclado en pantalla
       return ["playerOverlay", "configOverlay", "detailOverlay"]
         .map(id => document.getElementById(id))
         .find(o => o.classList.contains("open")) || document;
