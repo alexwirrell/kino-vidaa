@@ -828,7 +828,7 @@
     const statusPill = document.getElementById("statusPill");
     const installedCountBadge = document.getElementById("installedCountBadge");
 
-    const BUILD_TAG = "r40-2026-11-05";
+    const BUILD_TAG = "r41-2026-11-05";
     window.__kinoState = state; // gancho de depuración (inofensivo)
     // Versión visible en el menú: así se sabe si el TV cargó la última (o una copia en caché)
     document.getElementById("buildBadge").textContent = BUILD_TAG;
@@ -4372,10 +4372,10 @@ async function handle(request) {
         catch (e) { const l = rescued(); if (l) return l; throw e; }
         if (!res) return rescued() || [];
         const list = [];
-        if (res.url) list.push({ url: res.url, label: `${inst.name} · ${res.label || 'Principal'}`, mime: res.mime, headers: res.headers, subtitles: res.subtitles, drm: res.drm });
+        if (res.url) list.push({ url: res.url, pluginId, label: `${inst.name} · ${res.label || 'Principal'}`, mime: res.mime, headers: res.headers, subtitles: res.subtitles, drm: res.drm });
         if (Array.isArray(res.copies)) {
           res.copies.forEach(c => {
-            if (c && c.url) list.push({ url: c.url, label: `${inst.name} · ${c.label || 'Servidor'}`, mime: c.mime, headers: c.headers, subtitles: c.subtitles || res.subtitles });
+            if (c && c.url) list.push({ url: c.url, pluginId, label: `${inst.name} · ${c.label || 'Servidor'}`, mime: c.mime, headers: c.headers, subtitles: c.subtitles || res.subtitles });
           });
         }
         // Contrato Kino: `alternatives` son refs diferidas (c:...@n) que se resuelven al elegirlas
@@ -4444,8 +4444,18 @@ async function handle(request) {
         },
         // Elegir el episodio y reproducirlo sin pasar por el menú de servidores
         play: async ep => {
+          const cached = !state.cacheRetried && LinkCache.get(owner, ep);
+          state.cacheRetried = false;
+          if (cached) {
+            state.episodeContext = ep;
+            state.directStreams = [];
+            const entry = LinkCache.inject(owner, ep);
+            startPlayback(entry.url, `${owner.title} T${ep.season || 1}:E${ep.number || 1} (${entry.label})`, { mime: entry.mime, referer: refOf(entry), subtitles: entry.subtitles, drm: entry.drm });
+            return;
+          }
           await pickEp(ep);
           if (state.selectedItem !== owner || playerUI.isOpen()) return;
+          state.directStreams = rankStreams(state.directStreams || []);
           const d = (state.directStreams || []).find(x => x.url && !x.failed);
           const epName = `${owner.title} T${ep.season || 1}:E${ep.number || 1}`;
           if (d) startPlayback(d.url, `${epName} (${d.label})`, { mime: d.mime, referer: refOf(d), subtitles: d.subtitles });
@@ -4659,8 +4669,8 @@ async function handle(request) {
             try {
               const resolved = await withTimeout(callPluginFn(inst, "resolve", targetRef), 40000, inst.name);
               const before = state.directStreams.length;
-              if (resolved && resolved.url) state.directStreams.push({ url: resolved.url, label: `${inst.name} · ${resolved.label || match.title || "Principal"}`, mime: resolved.mime, headers: resolved.headers, subtitles: resolved.subtitles });
-              if (resolved && Array.isArray(resolved.copies)) resolved.copies.forEach(c => { if (c && c.url) state.directStreams.push({ url: c.url, label: `${inst.name} · ${c.label || "Opción"}`, mime: c.mime, headers: c.headers }); });
+              if (resolved && resolved.url) state.directStreams.push({ url: resolved.url, pluginId: inst.id, label: `${inst.name} · ${resolved.label || match.title || "Principal"}`, mime: resolved.mime, headers: resolved.headers, subtitles: resolved.subtitles, drm: resolved.drm });
+              if (resolved && Array.isArray(resolved.copies)) resolved.copies.forEach(c => { if (c && c.url) state.directStreams.push({ url: c.url, pluginId: inst.id, label: `${inst.name} · ${c.label || "Opción"}`, mime: c.mime, headers: c.headers }); });
               if (resolved && Array.isArray(resolved.alternatives)) resolved.alternatives.forEach(a => { if (a && a.ref) state.directStreams.push({ lazyRef: a.ref, lazyPluginId: inst.id, label: `${inst.name} · ${a.label || "Servidor alterno"}` }); });
               if (state.directStreams.length > before) { publish(); return; }
             } catch (e) { lastErr = e; }
@@ -4681,7 +4691,9 @@ async function handle(request) {
         }
         return state.directStreams;
       });
-      state.directSearch = { run, item, promise };
+      state.directSearch = { run, item, promise, done: false };
+      const thisSearch = state.directSearch;
+      promise.then(() => { thisSearch.done = true; }, () => { thisSearch.done = true; });
       return promise;
     }
 
@@ -5402,6 +5414,93 @@ async function handle(request) {
         await picker.play(ep);
       }
     };
+    // =========================================================================
+    // HISTORIAL DE ENLACES: qué plugin y qué servidor de video arrancan de verdad y cuáles
+    // fallan o dan relleno/429. Con eso se ordenan los enlaces y se prueba primero lo que
+    // suele funcionar. Y el último enlace bueno de cada título se reutiliza 20 min.
+    // =========================================================================
+    const StreamStats = {
+      KEY: "kino_stream_stats_v1",
+      hostOf(u) { try { return new URL(u).host.replace(/^www\./, ""); } catch (_) { return ""; } },
+      all() { const a = loadStore(this.KEY, {}); return a && typeof a === "object" && !Array.isArray(a) ? a : {}; },
+      record(url, kind) {
+        const listed = (state.directStreams || []).find(x => x.url === url);
+        const keys = ["h:" + this.hostOf(url)];
+        if (listed && listed.pluginId) keys.push("p:" + listed.pluginId);
+        const all = this.all();
+        keys.forEach(k => {
+          if (k.length < 3) return;
+          const e = all[k] || { ok: 0, fail: 0, filler: 0 };
+          e[kind] = (e[kind] || 0) + 1;
+          e.at = Date.now();
+          if (kind === "ok") e.lastOk = Date.now(); else e.lastBad = Date.now();
+          // Lo reciente pesa más: los contadores viejos se reducen a la mitad al pasar de 40
+          if (e.ok + e.fail + e.filler > 40) { e.ok = Math.round(e.ok / 2); e.fail = Math.round(e.fail / 2); e.filler = Math.round(e.filler / 2); }
+          all[k] = e;
+        });
+        saveStore(this.KEY, all);
+      },
+      // 0..1: (éxitos + 1) / (intentos + 2); el relleno cuenta como 1,5 fallos
+      scoreOf(key, all) {
+        const e = all[key];
+        if (!e) return 0.5;
+        return (e.ok + 1) / (e.ok + e.fail + 1.5 * e.filler + 2);
+      },
+      score(entry, all) {
+        all = all || this.all();
+        const pid = entry.pluginId || entry.lazyPluginId;
+        const ps = pid ? this.scoreOf("p:" + pid, all) : 0.5;
+        const hs = entry.url ? this.scoreOf("h:" + this.hostOf(entry.url), all) : 0.5;
+        return (entry.cached ? 1 : 0) + ps * hs;
+      }
+    };
+    // Ordena los enlaces (los que ya fallaron, al final) sin cambiar el orden entre iguales
+    function rankStreams(list) {
+      const all = StreamStats.all();
+      return list
+        .map((x, i) => ({ x, i, s: x.failed ? -1 : StreamStats.score(x, all) }))
+        .sort((a, b) => b.s - a.s || a.i - b.i)
+        .map(o => o.x);
+    }
+    // ¿Arrancar ya? Sí si hay un enlace sin historial o de un plugin/servidor que suele funcionar;
+    // si el que llegó suele fallar (relleno, 429), se espera hasta 8 s por otro mejor
+    function streamsReady(tStart, patienceMs) {
+      const ready = (state.directStreams || []).filter(x => x.url && !x.failed);
+      // Sin historial vale 0,25 (se arranca enseguida); con relleno o fallos recientes baja de 0,2
+      return ready.some(x => StreamStats.score(x) >= 0.2) || (ready.length > 0 && Date.now() - tStart > (patienceMs || 8000));
+    }
+    const LinkCache = {
+      KEY: "kino_linkcache_v1", TTL: 20 * 60 * 1000,
+      key(it, ep) { return it ? Watch.itemKey(it) + (ep ? `#${Number(ep.season) || 0}x${Number(ep.number) || 0}` : "") : ""; },
+      get(it, ep) {
+        const k = this.key(it, ep);
+        const e = k && loadStore(this.KEY, {})[k];
+        return e && Date.now() - e.at < this.TTL ? e : null;
+      },
+      save(url) {
+        const it = state.selectedItem;
+        if (!it || !url || /^file:|^blob:/.test(url)) return;
+        const listed = (state.directStreams || []).find(x => x.url === url);
+        if (!listed) return;
+        const all = loadStore(this.KEY, {});
+        const ep = Watch.ctx && Watch.ctx.ep;
+        all[this.key(it, ep)] = { url, mime: listed.mime, headers: listed.headers, referer: listed.referer, subtitles: listed.subtitles, drm: listed.drm, pluginId: listed.pluginId,
+          label: String(listed.label || "").replace(/^⚡ /, ""), at: Date.now() };
+        Object.keys(all).forEach(k => { if (Date.now() - all[k].at > this.TTL) delete all[k]; });
+        saveStore(this.KEY, all);
+      },
+      drop(it, ep) { const all = loadStore(this.KEY, {}); delete all[this.key(it, ep)]; saveStore(this.KEY, all); },
+      // Poner el último enlace bueno de este título al frente de la lista
+      inject(it, ep) {
+        const e = this.get(it, ep);
+        if (!e) return null;
+        state.directStreams = (state.directStreams || []).filter(x => x.url !== e.url);
+        const entry = Object.assign({}, e, { cached: true, label: "⚡ " + (e.label || "Último enlace que funcionó") });
+        state.directStreams.unshift(entry);
+        diagLog("player", `⚡ se usa el último enlace que funcionó (hace ${Math.round((Date.now() - e.at) / 60000)} min): ${e.label}`);
+        return entry;
+      }
+    };
     function fmtTime(sec) {
       sec = Math.max(0, Math.floor(sec || 0));
       const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s2 = sec % 60;
@@ -5562,7 +5661,39 @@ async function handle(request) {
           const listed = (state.directStreams || []).find(x => x.url === url);
           if (listed) listed.failed = true;
           badMedia.add(url);
+          if (!opts.live && !(listed && (listed.filler || listed.recorded))) StreamStats.record(url, "fail");
+          if (listed) listed.recorded = true;
+          // El enlace guardado ya caducó: olvidarlo y buscar de nuevo, una vez
+          if (listed && listed.cached && state.selectedItem) {
+            LinkCache.drop(state.selectedItem, Watch.ctx && Watch.ctx.ep);
+            if (!(state.directStreams || []).some(x => (x.url || x.lazyRef) && !x.failed) && !state.cacheRetried) {
+              state.cacheRetried = true;
+              diagLog("player", "⚡ el último enlace ya no sirve: se busca de nuevo");
+              const p = state.episodePicker, ep = state.episodeContext;
+              setTimeout(() => {
+                document.getElementById("closePlayerBtn").click();
+                if (p && ep && p.item === state.selectedItem) p.play(ep);
+                else document.getElementById("playDirectBtn").click();
+              }, 300);
+              return;
+            }
+          }
           const pending = (state.directStreams || []).filter(x => (x.url || x.lazyRef) && !x.failed);
+          // Sin más copias por ahora, pero otro plugin todavía está buscando: esperarlo (máx. 20 s)
+          const search = state.directSearch;
+          if (listed && !pending.length && search && search.item === state.selectedItem && !search.done && (state.autoHops || 0) < 4) {
+            playerUI.osd("⏳ Esta copia no sirve · esperando otra de tus plugins…", 3000);
+            diagLog("player", "↪ sin más copias todavía: se espera a los plugins que siguen buscando");
+            const tW = Date.now();
+            const waitMore = () => {
+              if (run !== playbackRun) return;
+              if ((state.directStreams || []).some(x => (x.url || x.lazyRef) && !x.failed)) { state.autoHops = (state.autoHops || 0) + 1; cycleServer(1, true); return; }
+              if (search.done || Date.now() - tW > 20000) { nextStage(); return; }
+              setTimeout(waitMore, 400);
+            };
+            setTimeout(waitMore, 400);
+            return;
+          }
           if (listed && pending.length && (state.autoHops || 0) < 4) {
             state.autoHops = (state.autoHops || 0) + 1;
             playerUI.osd(`✗ Este servidor no respondió · probando otro (${state.autoHops}/4)…`);
@@ -5599,10 +5730,13 @@ async function handle(request) {
             diagLog("player", `⚠️ el servidor dio un video de ${Math.round(d)} s (relleno, no la película): se prueba otra copia`);
             playerUI.osd(`⚠️ Video de ${Math.round(d)} s: no es la película · probando otra copia…`);
             badMedia.add(String(url).split(/[?#]/)[0]); // otra copia que dé este mismo clip se salta sin probarla
+            StreamStats.record(url, "filler");
+            if (listedStream) listedStream.filler = true;
             stageIdx = stages.length - 1; // no repetir este enlace por otras vías
             nextStage();
             return;
           }
+          if (!opts.live) { StreamStats.record(url, "ok"); LinkCache.save(url); }
           Watch.onStarted(video);
         };
         video.onerror = () => fail(`error de video${video.error ? " código " + video.error.code : ""}`);
@@ -6284,13 +6418,18 @@ async function handle(request) {
       if (!it) return;
       markUserPlayIntent();
       state.autoHops = 0;
+      if (!state.cacheRetried) LinkCache.inject(it, null);
+      state.cacheRetried = false;
       const playDirect = () => {
+        state.directStreams = rankStreams(state.directStreams || []);
         const d = (state.directStreams || []).find(x => x.url && !x.failed);
         if (d) { startPlayback(d.url, `${it.title} (${d.label})`, { mime: d.mime, referer: refOf(d), subtitles: d.subtitles }); return true; }
         return false;
       };
-      // 1. Enlace directo (se controla con el mando) o el video propio del título
-      if (playDirect()) return;
+      // 1. Enlace directo (se controla con el mando) o el video propio del título. Si el que hay
+      //    suele fallar y la búsqueda sigue, se espera un poco por otro mejor (paso 3)
+      const searching = state.directSearch && state.directSearch.item === it && !state.directSearch.done;
+      if ((!searching || streamsReady(Date.now())) && playDirect()) return;
       if (it.video) { startPlayback(it.video, it.title); return; }
       // 2. Título de un plugin: resolver su enlace
       if (it.pluginId && it.ref && !it.stremioBase) {
@@ -6307,7 +6446,7 @@ async function handle(request) {
         const allDone = Promise.all(pend);
         const t0 = Date.now();
         while (Date.now() - t0 < 15000) {
-          if ((state.directStreams || []).some(x => x.url)) break;
+          if (streamsReady(t0)) break;
           const finished = await Promise.race([allDone.then(() => true), new Promise(r => setTimeout(() => r(false), 300))]);
           if (finished) break;
         }
@@ -6322,9 +6461,11 @@ async function handle(request) {
         setStatus("⏳ Buscando el video en tus plugins (máx. 40 s)...", { priority: true });
         // Arrancar con el PRIMER enlace que aparezca (antes se esperaba a todos los plugins)
         const all = findDirectStreams(it, { season: state.selectedSeason, episode: state.selectedEpisode });
-        const tEnd = Date.now() + 40000;
+        const tEnd = Date.now() + 40000, tStart = Date.now();
         while (Date.now() < tEnd) {
-          if ((state.directStreams || []).some(x => x.url && !x.failed)) break;
+          // Arrancar ya si hay un enlace de un plugin/servidor que suele funcionar; si el primero
+          // que llegó suele fallar (relleno, 429), esperar hasta 8 s por uno mejor
+          if (streamsReady(tStart)) break;
           const finished = await Promise.race([all.then(() => true), new Promise(r => setTimeout(() => r(false), 300))]);
           if (finished) break;
           if (state.selectedItem !== it || playerUI.isOpen()) return;
@@ -6506,11 +6647,27 @@ async function handle(request) {
       try { res = await withTimeout(callPluginFn(inst, "resolve", entry.lazyRef), 40000, inst.name); } catch (_) {}
       if (!res || !res.url) res = hlsRescue(inst.id, since);
       if (!res || !res.url) return false;
-      Object.assign(entry, { url: res.url, mime: res.mime, headers: res.headers, subtitles: res.subtitles });
+      Object.assign(entry, { url: res.url, pluginId: entry.lazyPluginId, mime: res.mime, headers: res.headers, subtitles: res.subtitles, drm: res.drm });
       return true;
     }
     // ⏮ Anterior / Siguiente ⏭: recorre los enlaces directos (incluidas las
     // alternativas por resolver del plugin) o, en una página embed, los servidores web
+    // Sin más copias por ahora pero con plugins todavía buscando: esperar a que llegue otra (máx. 20 s)
+    function waitForMoreStreams(onMore, onNone) {
+      const search = state.directSearch, run = playbackRun, t0 = Date.now();
+      if (!search || search.item !== state.selectedItem || search.done) return false;
+      const known = new Set((state.directStreams || []).map(x => x.url || x.lazyRef));
+      playerUI.osd("⏳ Esperando otra copia de tus plugins…", 3000);
+      diagLog("player", "↪ sin más copias todavía: se espera a los plugins que siguen buscando");
+      const tick = () => {
+        if (run !== playbackRun || !playerUI.isOpen()) return;
+        if ((state.directStreams || []).some(x => (x.url || x.lazyRef) && !x.failed && !known.has(x.url || x.lazyRef))) { onMore(); return; }
+        if (search.done || Date.now() - t0 > 20000) { onNone(); return; }
+        setTimeout(tick, 400);
+      };
+      setTimeout(tick, 400);
+      return true;
+    }
     async function cycleServer(delta, auto) {
       if (!auto) state.autoHops = 0;
       const list = (state.directStreams || []).filter(x => x.url || x.lazyRef);
@@ -6524,9 +6681,10 @@ async function handle(request) {
           if (!nxt.url && !(await resolveLazyStream(nxt))) { nxt.failed = true; diagLog("player", `✗ la alternativa «${nxt.label}» no dio enlace`); continue; }
           if (isBadMedia(nxt.url, auto)) { nxt.failed = true; diagLog("player", `⏭ «${nxt.label}» dio el mismo video que ya falló: se salta sin probarlo`); continue; }
           if (!playerUI.isOpen()) return;
-          startPlayback(nxt.url, `${state.selectedItem ? state.selectedItem.title : "Kino TV"} (${nxt.label})`, { mime: nxt.mime, referer: refOf(nxt), subtitles: nxt.subtitles });
+          startPlayback(nxt.url, `${state.selectedItem ? state.selectedItem.title : "Kino TV"} (${nxt.label})`, { mime: nxt.mime, referer: refOf(nxt), subtitles: nxt.subtitles, drm: nxt.drm });
           return;
         }
+        if (auto && waitForMoreStreams(() => cycleServer(1, true), () => playerUI.osd("No hay más servidores que probar"))) return;
         playerUI.osd("No hay más servidores que probar");
         return;
       }
