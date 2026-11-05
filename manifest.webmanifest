@@ -1,0 +1,15 @@
+{
+  "name": "Kino TV — VIDAA OS Edition",
+  "short_name": "Kino TV",
+  "description": "Plugins de Kino en el navegador del TV Hisense (VIDAA OS), con control remoto.",
+  "lang": "es",
+  "start_url": "./",
+  "display": "fullscreen",
+  "background_color": "#0b0e17",
+  "theme_color": "#e50914",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
